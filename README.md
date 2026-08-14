@@ -1,6 +1,8 @@
 # huginn
 
-Workstation setup kit for [Gortex](https://gortex.dev) across **Claude Code, GitHub Copilot CLI, Codex, and OpenCode** on Windows.
+Workstation setup kit for [Gortex](https://gortex.dev) across **Claude Code, GitHub Copilot CLI, Copilot in VS Code, Codex, and OpenCode** on Windows.
+
+Five names, four runtimes — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its hooks and skills, so wiring Copilot CLI covers both.
 
 Gortex installs MCP servers and hooks on its own. This kit closes three gaps it leaves open:
 

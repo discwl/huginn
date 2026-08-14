@@ -1,6 +1,8 @@
 # Gortex Agent Kit — Setup Runbook
 
-Portable setup for **Gortex** (code-graph daemon + MCP server) across **Claude Code, GitHub Copilot CLI, Codex, and OpenCode** on Windows.
+Portable setup for **Gortex** (code-graph daemon + MCP server) across **Claude Code, GitHub Copilot CLI, Copilot in VS Code, Codex, and OpenCode** on Windows.
+
+Those five names are **four runtimes** — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its configuration, so wiring Copilot CLI covers both. See section 4.
 
 This runbook is written to be executed by an agent. Hand it, plus the `C:\huginn` folder, to a coding agent on the target machine and say:
 
@@ -90,6 +92,15 @@ The installer:
 5. Mirrors Gortex skills into `~\.agents\skills`, seeding them first if needed (see below).
 
 Only detected agents are wired, so you do not need to name the ones this machine uses. Nothing is installed for an agent that is absent.
+
+**Copilot in VS Code needs no separate wiring.** VS Code does not embed its own copy of the CLI. Its Copilot agent host ships a bootstrapper that locates `copilot` on PATH and execs it with the arguments unchanged, setting no config-dir, `HOME`, or `XDG_*` override. It therefore reads the same `~\.copilot\hooks\gortex.json` and the same `~\.agents\skills` as the terminal CLI, and is gated identically. Wiring Copilot CLI covers both surfaces.
+
+Two consequences worth knowing:
+
+- The host enforces a **minimum Copilot CLI version of 0.0.394** at launch. Below that it refuses to start, and the gate never runs because the CLI never runs.
+- If `copilot` is not on PATH for the VS Code process, the host cannot start at all. A PATH change made after VS Code launched will not be visible to it — restart VS Code, not just the window.
+
+> This covers the Copilot **agent host**. The native Copilot Chat panel is a separate runtime that exposes MCP and instructions but no hook API, so it cannot be gated and is out of scope for this kit.
 
 **You do not need Claude Code to get skills.** Gortex writes its skill set for exactly one adapter — Claude Code, under `~\.claude\skills` — and that is the only source the mirror can read. On a machine without Claude, the installer therefore runs the `claude-code` adapter itself purely to produce that directory:
 
@@ -245,6 +256,7 @@ C:\huginn\Sync-AgentSkills.ps1 -Prune
 |---|---|
 | Claude Code | `~\.claude\skills` (Gortex writes here) |
 | Copilot CLI | `~\.agents\skills` |
+| Copilot in VS Code | `~\.agents\skills` — same binary as Copilot CLI, nothing extra to do |
 | Codex | `~\.codex\skills` **and** `~\.agents\skills` |
 
 `~\.agents\skills` serves **both** Copilot CLI and Codex, so mirroring there once avoids registering every skill twice.
@@ -474,4 +486,6 @@ Deployed to `~\.gortex\agent-hooks\` at install time. Per-agent wiring lives in 
 - **Claude Code runs hooks through POSIX `sh` on Windows**, not `cmd`. That is why its hook command is shell script invoking `claude-hook.cmd`, which `sh` can exec directly.
 - **Gortex's agent name is `claude-code`**; its hook wire-protocol flag is `--agent=claude`. Two different namespaces.
 - **Copilot CLI has no Gortex adapter**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned.
+- **Copilot in VS Code shells out to the CLI.** Its bootstrapper lives at `%APPDATA%\Code\User\globalStorage\github.copilot-chat\copilotCli\copilot.ps1`; it resolves the real `copilot` binary on PATH, version-checks it, and execs it with an unmodified environment. There is no second configuration tree to wire, and no VS Code entry in the installer's detection table by design.
+- **Gortex's `vscode` adapter is unrelated to any of this.** `gortex install --agents vscode` writes a repo-local `.vscode\mcp.json` for the native Copilot Chat panel. It installs no hooks and no skills, and has no effect on the agent host.
 - `$HOME` is fixed at PowerShell session start and **cannot** be redirected by setting `$env:USERPROFILE` in a child process. Do not attempt to sandbox-test the installer that way; it will write to the real config tree.
