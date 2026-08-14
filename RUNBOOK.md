@@ -296,6 +296,46 @@ Add the `worktree` block **only if** you need worktree indexing before native Go
 
 Setup emits a heartbeat every 10 seconds with state, elapsed time, timeout, branch, and HEAD.
 
+### Adding your own setup steps
+
+`setup` and `teardown` accept either a single string or an **array of strings** (`z.union([z.string(), z.array(z.string())])`). Use the array form to add per-repo bootstrapping such as dependency installs:
+
+```json
+{
+  "worktree": {
+    "setup": [
+      "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"C:\\huginn\\transitional\\Manage-GortexWorktree.ps1\" -Action Setup -WorktreePath . -SourceCheckoutPath \"$env:PASEO_SOURCE_CHECKOUT_PATH\"",
+      "npm ci --no-audit --no-fund"
+    ],
+    "teardown": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"C:\\huginn\\transitional\\Manage-GortexWorktree.ps1\" -Action Teardown"
+  }
+}
+```
+
+Entries run **sequentially and fail-fast** — a non-zero exit throws and skips the rest. The worktree is preserved on failure (`cleanupOnFailure: false`), so you can inspect it. Each entry runs in its own shell with `cwd` set to the worktree, and the UI reports per-step progress (`2/2`).
+
+Do not chain steps with `;` or `&&` inside one string. Each array entry is invoked directly rather than concatenated into a shell line, and in PowerShell `;` swallows the failure — a broken install would silently continue to the next step.
+
+**Put the Gortex step first.** Paseo starts the agent as soon as the worktree exists and runs setup in the background, so ordering decides what the gate can protect:
+
+| Order | Gate state at agent start | Result |
+|---|---|---|
+| Gortex first | tracked, indexing (within ~5s) | agent waits for the index |
+| Gortex last | untracked | **allowed immediately** — the gate cannot help |
+
+The gate allows an untracked cwd on purpose, since the agent may legitimately be working outside any tracked checkout. Registering first is what converts that into a wait.
+
+Steps after the Gortex one run once the gate has already released the agent, so it may work briefly while they finish — usually acceptable for dependency installs. If a step must complete before the agent touches anything, have the last entry write a marker file and wait on it:
+
+```powershell
+# final setup entry
+New-Item -Force -ItemType File (Join-Path (git rev-parse --absolute-git-dir) 'setup-complete')
+```
+
+Use `--absolute-git-dir`, which is per-worktree. `--git-common-dir` is shared by every worktree, so a marker there would falsely release all of them. Delete it on teardown.
+
+These commands receive `PASEO_WORKTREE_PATH`, `PASEO_BRANCH_NAME`, `PASEO_SOURCE_CHECKOUT_PATH`, `PASEO_WORKSPACE_ID`, and `PASEO_AGENT_CWD`.
+
 ---
 
 ## 11. Upgrading Gortex
