@@ -431,6 +431,24 @@ if ($selected -contains 'opencode') {
 if (-not $SkipSkills) {
     Write-Step 'Mirroring Gortex skills to Copilot CLI and Codex.'
 
+    $claudeSkills = Join-Path $ConfigRoot '.claude\skills'
+
+    # Gortex writes skills for exactly one adapter: Claude Code. Every other
+    # agent gets MCP wiring and hooks but no skills, so ~/.claude/skills is the
+    # only source this mirror can read. On a machine without Claude Code that
+    # directory never appears, auto-detection drops claude-code from the
+    # selection, and Copilot and Codex silently end up with no skills at all.
+    # Seeding it directly is what keeps those two agents working: `gortex
+    # install --agents claude-code` writes the skill set whether or not the
+    # Claude CLI exists. Hooks and CLAUDE.md are suppressed because there is no
+    # Claude session here to consume them.
+    if (-not (Test-Path -LiteralPath $claudeSkills -PathType Container) -and $gortexExe -and -not $SkipGortexInstall) {
+        if ($PSCmdlet.ShouldProcess($claudeSkills, 'Seed Gortex skills via claude-code adapter')) {
+            Write-Detail 'no skill source yet; seeding it from the claude-code adapter'
+            & $gortexExe install --agents claude-code --claude-config-dir (Join-Path $ConfigRoot '.claude') --no-hooks --no-claude-md --yes 2>&1 | Out-Null
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $skillSync -PathType Leaf)) {
         Write-Warning "Sync-AgentSkills.ps1 not found at $skillSync"
     }
@@ -441,7 +459,7 @@ if (-not $SkipSkills) {
         try {
             # ~/.agents/skills is read by both Copilot CLI and Codex, so one
             # mirror serves both without registering every skill twice.
-            & $skillSync -Prune -SourceRoot (Join-Path $ConfigRoot '.claude\skills') -TargetRoot (Join-Path $ConfigRoot '.agents\skills') | Out-Null
+            & $skillSync -Prune -SourceRoot $claudeSkills -TargetRoot (Join-Path $ConfigRoot '.agents\skills') | Out-Null
             $count = @(Get-ChildItem (Join-Path $ConfigRoot '.agents\skills') -Directory -Filter 'gortex-*' -ErrorAction SilentlyContinue).Count
             Write-Detail "$count skill(s) mirrored"
         }

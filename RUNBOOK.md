@@ -41,11 +41,19 @@ The two tiers share no code, so dropping the transitional tier changes nothing a
 ```powershell
 # Required
 winget install --id Microsoft.PowerShell        # pwsh 7+
-gortex --version                                # 0.63.3 or newer
 git --version
+
+# Gortex itself — signed release, SHA-256 verified, adds itself to the user PATH
+irm https://get.gortex.dev/install.ps1 | iex
 
 # Optional: needed only for store compaction (section 9)
 winget install --id SQLite.SQLite
+```
+
+Open a new shell so the PATH change applies, then confirm:
+
+```powershell
+gortex version                                  # 0.63.3 or newer
 ```
 
 Confirm the daemon runs:
@@ -79,7 +87,21 @@ The installer:
 2. Copies the hook runtime into `~\.gortex\agent-hooks`.
 3. Wires each agent's `UserPromptSubmit` to the readiness gate.
 4. Installs the OpenCode plugin.
-5. Mirrors Gortex skills into `~\.agents\skills`.
+5. Mirrors Gortex skills into `~\.agents\skills`, seeding them first if needed (see below).
+
+Only detected agents are wired, so you do not need to name the ones this machine uses. Nothing is installed for an agent that is absent.
+
+**You do not need Claude Code to get skills.** Gortex writes its skill set for exactly one adapter — Claude Code, under `~\.claude\skills` — and that is the only source the mirror can read. On a machine without Claude, the installer therefore runs the `claude-code` adapter itself purely to produce that directory:
+
+```powershell
+gortex install --agents claude-code --no-hooks --no-claude-md --yes
+```
+
+This writes all 21 `gortex-*` skills whether or not the Claude CLI exists. Hooks and `CLAUDE.md` are suppressed because no Claude session will consume them. The step is skipped when `~\.claude\skills` already exists, so it costs nothing on repeat runs, and it is bypassed entirely by `-SkipSkills` or `-SkipGortexInstall`.
+
+Expect `21 skill(s) mirrored` on a fresh machine. `0` means seeding was skipped — check that `gortex` is on PATH.
+
+This is a workaround for Gortex distributing skills to one adapter only. When upstream ships skills for the other agents, drop the mirror and read section 11.
 
 It is **idempotent** — a second run reports `already current` and writes nothing. It backs up every file it modifies as `<name>.bak-<timestamp>`.
 
@@ -226,6 +248,13 @@ C:\huginn\Sync-AgentSkills.ps1 -Prune
 | Codex | `~\.codex\skills` **and** `~\.agents\skills` |
 
 `~\.agents\skills` serves **both** Copilot CLI and Codex, so mirroring there once avoids registering every skill twice.
+
+If `~\.claude\skills` does not exist, this script throws — it has no source to mirror. The installer seeds it automatically (section 4); to do it by hand on a machine without Claude Code:
+
+```powershell
+gortex install --agents claude-code --no-hooks --no-claude-md --yes
+C:\huginn\Sync-AgentSkills.ps1 -Prune
+```
 
 The mirror uses **directory junctions, not copies**, so skills stay current when Gortex rewrites them on upgrade. Junctions need no elevation.
 
@@ -388,6 +417,14 @@ gortex daemon start --detach
 
 **Codex says a hook is untrusted.**
 Expected after any hook edit. Approve it once.
+
+**`0 skill(s) mirrored`, or Copilot and Codex see no `gortex-*` skills.**
+The mirror reads `~\.claude\skills`, which only Gortex's `claude-code` adapter writes. Seed it, then mirror — Claude Code itself is not required:
+```powershell
+gortex install --agents claude-code --no-hooks --no-claude-md --yes
+C:\huginn\Sync-AgentSkills.ps1 -Prune
+```
+Then restart the agents. If seeding writes nothing, `gortex` is not on PATH — open a new shell after installing it.
 
 **Setup looks frozen with no output.**
 `gortex daemon reload` scales with store size and has been observed taking 32 s to 4.5 minutes. The helper heartbeats through it. **Trust `~\.gortex\logs\worktree-*.log`, never the terminal pane** — panes go stale independently.

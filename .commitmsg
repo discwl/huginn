@@ -1,0 +1,22 @@
+Seed Gortex skills when Claude Code is absent
+
+Gortex writes its skill set for exactly one adapter, Claude Code, under
+~/.claude/skills. That directory is the only source Sync-AgentSkills can
+mirror from, so on a machine without Claude Code the chain broke silently:
+auto-detection dropped claude-code from the selection, gortex install never
+ran for it, the mirror threw "Skill source not found", and Copilot CLI and
+Codex ended up with no gortex-* skills while the installer still reported
+success.
+
+The installer now runs the claude-code adapter itself when the skill source
+is missing, with hooks and CLAUDE.md suppressed since no Claude session will
+consume them. The adapter writes all 21 skills whether or not the Claude CLI
+exists, which is what makes this work. Verified against a sandbox config root
+holding only .copilot and .codex: 21 skills mirrored, exit 0, and a second
+run re-seeds nothing.
+
+Also documents installing Gortex itself. The prerequisites only checked for
+the binary and never said how to obtain it, which left a fresh machine stuck
+before step one.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
