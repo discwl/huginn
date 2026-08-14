@@ -5,3 +5,6 @@
 # Local logs and scratch
 *.log
 /tmp/
+
+# Scratch commit-message file
+.commitmsg
