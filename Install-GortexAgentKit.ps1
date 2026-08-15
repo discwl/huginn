@@ -33,8 +33,12 @@
     Which agents to wire. 'auto' wires every agent detected on the machine.
 
 .PARAMETER HookMode
-    Gortex hook posture forwarded to enrichment. 'enrich' never denies a tool
-    call; it appends graph context after the tool runs.
+    Gortex hook posture, forwarded both to `gortex install` and to the kit's own
+    hook adapters. 'deny' (the Gortex default) makes PreToolUse refuse Grep and
+    Glob against indexed source, so the agent has to reach for the graph.
+    'enrich' never refuses anything and only appends context, which is gentler
+    for onboarding but relies entirely on the model choosing to comply.
+    'consult-unlock' and 'nudge' sit between the two.
 
 .PARAMETER GateTimeoutSec
     Timeout for the gated UserPromptSubmit hook. This must exceed the longest
@@ -62,7 +66,7 @@ param(
     [string[]] $Agents = @('auto'),
 
     [ValidateSet('enrich', 'deny', 'consult-unlock', 'nudge')]
-    [string] $HookMode = 'enrich',
+    [string] $HookMode = 'deny',
 
     [ValidateRange(60, 21600)]
     [int] $GateTimeoutSec = 1860,
@@ -421,7 +425,7 @@ if ($selected -contains 'copilot') {
     # Windows PowerShell is used because it is guaranteed present; the hook it
     # launches is version-agnostic.
     $winPs = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $inner = "if (Test-Path -LiteralPath '$copilotHook' -PathType Leaf) { & '$copilotHook'; exit `$LASTEXITCODE }; [Console]::In.ReadToEnd() | Out-Null; exit 0"
+    $inner = "if (Test-Path -LiteralPath '$copilotHook' -PathType Leaf) { & '$copilotHook' -Mode '$HookMode'; exit `$LASTEXITCODE }; [Console]::In.ReadToEnd() | Out-Null; exit 0"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
     $command = "$(ConvertTo-PosixPath $winPs) -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
 
@@ -605,7 +609,16 @@ if ($selected -contains 'codex') {
         $toml = Read-TextFile $codexConfig
     }
 
-    $gateCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-PosixPath $codexHook)"
+    # `gortex install` merges its hook table idempotently: on a config that
+    # already carries the blocks it leaves the existing `--mode=<posture>`
+    # strings alone, so --hook-mode only ever applies to a first install.
+    # Re-pointing them here is what actually makes -HookMode take effect on an
+    # already-wired machine. These are Gortex's own direct entries -- the ones
+    # that carry the PreToolUse deny -- so leaving them stale silently keeps the
+    # old posture while every report claims the new one.
+    $toml = [regex]::Replace($toml, '(--agent=codex\s+--mode=)[\w-]+', "`${1}$HookMode")
+
+    $gateCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-PosixPath $codexHook) -Mode $HookMode"
 
     $block = @(
         '',
@@ -617,18 +630,23 @@ if ($selected -contains 'codex') {
         "type = 'command'"
     ) -join [Environment]::NewLine
 
-    if ($toml -match '(?m)^\[\[hooks\.UserPromptSubmit\]\]') {
-        # Replace only the existing gated block, leaving every other hook,
-        # the trust state table, and unrelated settings untouched.
-        $pattern = '(?ms)^\[\[hooks\.UserPromptSubmit\]\].*?(?=^\[(?!\[hooks\.UserPromptSubmit)|\Z)'
-        $updated = [regex]::Replace($toml, $pattern, ($block.TrimStart() + [Environment]::NewLine + [Environment]::NewLine), 1)
-    }
-    elseif ($toml -match '(?m)^\[hooks\.state\]') {
+    # Every UserPromptSubmit block is stripped, not just the first. `gortex
+    # install` unconditionally re-adds its own, so replacing a single block
+    # leaves Gortex's copy behind and the two then run in sequence -- the gate
+    # plus an ungated enrichment. Removing all of them and inserting the gate
+    # once is idempotent no matter how many have accumulated.
+    $promptPattern = '(?ms)^\[\[hooks\.UserPromptSubmit\]\].*?(?=^\[(?!\[hooks\.UserPromptSubmit)|\Z)'
+    $toml = [regex]::Replace($toml, $promptPattern, '')
+
+    if ($toml -match '(?m)^\[hooks\.state\]') {
         $updated = $toml -replace '(?m)^\[hooks\.state\]', ($block.TrimStart() + [Environment]::NewLine + [Environment]::NewLine + '[hooks.state]')
     }
     else {
         $updated = $toml.TrimEnd() + [Environment]::NewLine + $block + [Environment]::NewLine
     }
+
+    # Collapse the blank runs left behind by the stripped blocks.
+    $updated = [regex]::Replace($updated, '(\r?\n){3,}', ([Environment]::NewLine * 2))
 
     if (Set-ManagedContent -Path $codexConfig -Content $updated) {
         Set-Result 'codex' 'wired' 're-approve the hook on next launch'
@@ -667,7 +685,7 @@ if ($selected -contains 'claude-code') {
     # is shell script, not a Windows command line. The else-branch drains stdin
     # so a missing hook file cannot hang the turn.
     $posixCmd = ConvertTo-PosixPath $claudeCmd
-    $command = "if [ -f '$posixCmd' ]; then '$posixCmd'; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi"
+    $command = "if [ -f '$posixCmd' ]; then '$posixCmd' -Mode $HookMode; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi"
 
     $entry = [pscustomobject]@{
         matcher = ''

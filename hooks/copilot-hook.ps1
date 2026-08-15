@@ -162,6 +162,17 @@ try {
         if ($null -ne $nested.PSObject.Properties['additionalContext']) {
             $context = [string] $nested.additionalContext
         }
+        # Under the 'deny' posture Gortex returns permissionDecision plus
+        # permissionDecisionReason and NO additionalContext at all, so reading
+        # only additionalContext silently drops the redirect message entirely --
+        # strictly worse than 'enrich', which at least surfaces the advice.
+        # Copilot honours a hard block only on UserPromptSubmit, so a PreToolUse
+        # denial is surfaced as context: the tool still runs, but the model is
+        # told to use the graph instead.
+        if ([string]::IsNullOrWhiteSpace($context) -and
+            $null -ne $nested.PSObject.Properties['permissionDecisionReason']) {
+            $context = [string] $nested.permissionDecisionReason
+        }
     }
     if ([string]::IsNullOrWhiteSpace($context) -and $null -ne $parsed.PSObject.Properties['additionalContext']) {
         $context = [string] $parsed.additionalContext
