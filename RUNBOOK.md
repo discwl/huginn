@@ -654,7 +654,15 @@ Compact the store (section 9).
 Confirm you edited `~\.gortex\agent-hooks\*`, not the kit folder. The installer copies files; the kit is the source, the deployed copy is what runs. Re-run the installer after editing the kit.
 
 **Copilot still follows the old rules after `gortex instructions switch`.**
-Expected, and nothing warns you about it. Gortex rewrites its own targets on a switch — `~\.claude\CLAUDE.md` and `~\.codex\AGENTS.md` both `@`-import `~\.gortex\instructions\active.md`, so they track the change for free. Copilot has no import resolution, so the kit **inlines** the profile body into `~\.copilot\copilot-instructions.md`, and an inlined copy does not follow anything. Re-run the installer, or:
+Expected, and nothing warns you about it. Only **Claude** tracks a switch for free: `~\.claude\CLAUDE.md` is a ~400-byte stub that `@`-imports `~\.gortex\instructions\active.md`, so it re-reads the profile every session.
+
+Every other agent gets an **inlined copy** of the body, frozen when it was written — `~\.codex\AGENTS.md` and `~\.config\opencode\AGENTS.md` from Gortex itself, and the Copilot instructions file from the kit. An inlined copy follows nothing. Run:
+
+```powershell
+C:\huginn\Update-GortexAgents.ps1        # or -Profile <name> to switch and propagate in one step
+```
+
+or re-run the installer, or:
 
 ```powershell
 pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath .
@@ -662,6 +670,16 @@ pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath .
 ```
 
 `-CheckOnly` reports this as `Copilot instructions are stale (active profile changed)`. It compares the file against the current profile body, so it is the only detector for a failure where everything still appears to work and the model is simply told the wrong thing. Restart the agent afterwards — instructions load at session start.
+
+**Gortex and the kit keep rewriting the same rule block.**
+Three writers own that block — `gortex install`, `Install-GortexAgentKit.ps1`, and `Update-GortexAgents.ps1` — and Gortex writes the Codex and OpenCode files itself. So the block text must be **byte-identical** across all three or each sees the others' output as drift and rewrites it forever, stranding a `.bak` on every run.
+
+The canonical form is exactly what Gortex emits: start marker, newline, profile body, blank line, end marker. Nothing else — an earlier kit build added a two-line `<!-- Managed by … -->` comment, which was enough to make `gortex install --dry-run` report `would-merge` against a file whose rules were already current. Confirm agreement from both sides:
+
+```powershell
+gortex install --agents codex --no-hooks --dry-run --json   # expect: AGENTS.md  skip  unchanged
+C:\huginn\Update-GortexAgents.ps1 -SkipSkills               # expect: codex/AGENTS.md  current
+```
 
 **`copilot-instructions.md` is full of `â€"` and the repair keeps reporting it stale.**
 An older build wrote it with `Set-Content`. Under Windows PowerShell 5.1 `Get-Content` decodes a BOM-less file as ANSI, so the em dashes in the Gortex profile were read as mojibake and written straight back out, and the comparison against the real profile then never matched. Both scripts now read and write UTF-8 without a BOM through .NET, which is also what makes them byte-identical under 5.1 and pwsh 7. Delete the file and re-run the installer to regenerate it.
@@ -713,7 +731,7 @@ Only the `gortex` entry and the delimited block are kit-owned; every other serve
 
 The panel honours the file only while `github.copilot.chat.codeGeneration.useInstructionFiles` is `true`. That is the default and the kit does not touch it — `settings.json` is a file users edit by hand, and owning it to force a default would cause more problems than it solves. If the panel ignores the rules, check that setting first.
 
-Gortex writes the Claude and Codex equivalents itself (`~\.claude\CLAUDE.md`, `~\.codex\AGENTS.md`) and both `@`-import `~\.gortex\instructions\active.md`. Copilot has no import syntax, so the kit inlines the body instead. That is the whole reason a switch of instruction profile needs a re-run — see section 12.
+Gortex writes the Claude and Codex equivalents itself, but not in the same form. `~\.claude\CLAUDE.md` is a stub that `@`-imports `~\.gortex\instructions\active.md`; `~\.codex\AGENTS.md` and `~\.config\opencode\AGENTS.md` get the profile body **inlined**, because neither runtime resolves `@`-imports. Copilot has no import syntax either, so the kit inlines the body there too. Claude is therefore the only agent that follows a profile switch on its own — everything else needs `Update-GortexAgents.ps1` or a re-run of the installer. See section 12.
 
 ---
 

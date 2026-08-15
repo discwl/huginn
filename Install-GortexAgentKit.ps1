@@ -298,13 +298,17 @@ function Merge-InstructionBlock {
     $startMark = '<!-- gortex:rules:start -->'
     $endMark = '<!-- gortex:rules:end -->'
 
-    $block = @(
-        $startMark,
-        '<!-- Managed by Install-GortexAgentKit.ps1. Edits inside this block are overwritten.',
-        '     Re-run the installer after `gortex instructions switch` to refresh it. -->',
-        $Body.Trim(),
-        $endMark
-    ) -join [Environment]::NewLine
+    # Byte-identical to what `gortex install` itself writes: start marker, LF,
+    # body, blank line, end marker -- LF throughout, and no management comment.
+    #
+    # That exactness is the whole point. Gortex owns this same block in
+    # ~/.codex/AGENTS.md and ~/.config/opencode/AGENTS.md, so any difference
+    # here -- even a comment noting who manages the block -- makes `gortex
+    # install` and this installer each treat the other's output as drift and
+    # rewrite it forever, stranding a .bak on every alternation. Verified: a
+    # two-line comment was enough to make `gortex install --dry-run` report
+    # "would-merge" against a file whose rules were already current.
+    $block = ($startMark + "`n" + $Body.Trim() + "`n`n" + $endMark)
 
     $existing = ''
     if (Test-Path -LiteralPath $Path -PathType Leaf) {

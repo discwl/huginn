@@ -207,18 +207,12 @@ if (-not $SkipInstructions) {
         $text = Read-TextFile $t.Path
         $label = '{0}/{1}' -f $t.Agent, (Split-Path -Leaf $t.Path)
 
-        # Must match Install-GortexAgentKit.ps1's Merge-InstructionBlock byte for
-        # byte, including the management comment and its [Environment]::NewLine
-        # joins. If the two scripts emitted different block text they would each
-        # see the other's output as drift and rewrite it on every run, stranding
-        # a backup each time.
-        $block = @(
-            $startMarker,
-            '<!-- Managed by Install-GortexAgentKit.ps1. Edits inside this block are overwritten.',
-            '     Re-run the installer after `gortex instructions switch` to refresh it. -->',
-            $body.Trim(),
-            $endMarker
-        ) -join [Environment]::NewLine
+        # Must match `gortex install` byte for byte -- start marker, LF, body,
+        # blank line, end marker -- which Install-GortexAgentKit.ps1 also emits.
+        # Gortex owns this same block in the Codex and OpenCode files, so three
+        # writers now agree on one format. Any difference, even a comment naming
+        # the manager, makes them rewrite each other forever.
+        $block = ($startMarker + "`n" + $body.Trim() + "`n`n" + $endMarker)
 
         $startIdx = $text.IndexOf($startMarker)
         $endIdx = $text.IndexOf($endMarker)
