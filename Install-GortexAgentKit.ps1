@@ -468,8 +468,32 @@ if ($selected -contains 'copilot') {
     $instrState = 'skipped'
     $activeInstructions = Join-Path $ConfigRoot '.gortex\instructions\active.md'
     if (Test-Path -LiteralPath $activeInstructions -PathType Leaf) {
+        # Both locations are loaded at once -- verified by planting a sentinel in
+        # copilot-instructions.md and having a fresh `copilot -p` session echo it
+        # back alongside a value that only ~\.copilot\instructions\ carries. So
+        # writing the canonical file blind would hand the model the same rule
+        # block twice on any machine that already keeps one under instructions\,
+        # and the two copies would then drift apart on the next profile switch.
+        # Prefer whichever file already owns the block; fall back to canonical.
+        $instrTarget = Join-Path $ConfigRoot '.copilot\copilot-instructions.md'
+        if (-not (Test-Path -LiteralPath $instrTarget -PathType Leaf)) {
+            $existingBlock = @(
+                Get-ChildItem -LiteralPath (Join-Path $ConfigRoot '.copilot\instructions') `
+                    -File -Filter '*.md' -ErrorAction SilentlyContinue |
+                    Where-Object { (Read-TextFile $_.FullName) -match '<!-- gortex:rules:start -->' } |
+                    Sort-Object Name
+            )
+            if ($existingBlock.Count -gt 0) {
+                $instrTarget = $existingBlock[0].FullName
+                Write-Detail "reusing existing rule block in $($existingBlock[0].Name)"
+                if ($existingBlock.Count -gt 1) {
+                    Write-Warning ("Copilot has {0} instruction files carrying the gortex block; only {1} is managed." -f $existingBlock.Count, $existingBlock[0].Name)
+                }
+            }
+        }
+
         $instrState = Merge-InstructionBlock `
-            -Path (Join-Path $ConfigRoot '.copilot\copilot-instructions.md') `
+            -Path $instrTarget `
             -Body (Read-TextFile $activeInstructions)
         Write-Detail "instructions: $instrState"
     }

@@ -532,29 +532,68 @@ gortex version
 gortex upgrade
 gortex version
 
-# 3. Re-assert kit wiring. -Force re-seeds the Codex hook table (section 4).
+# 3. Propagate what the new binary brought: instruction text and skills
+C:\huginn\Update-GortexAgents.ps1
+
+# 4. Re-assert kit wiring. -Force re-seeds the Codex hook table (section 4).
 C:\huginn\Install-GortexAgentKit.ps1 -Force
 
-# 4. Diff the skill set — new skills appear here first
+# 5. Diff the skill set — new skills appear here first
 (Get-ChildItem "$HOME\.claude\skills" -Directory -Filter 'gortex-*').Name | Set-Content "$env:TEMP\skills-after.txt"
 Compare-Object (Get-Content "$env:TEMP\skills-before.txt") (Get-Content "$env:TEMP\skills-after.txt")
 
-# 5. Check for new hook events or postures
+# 6. Check for new hook events or postures
 gortex hook --help
 gortex install --print-config codex
 
-# 6. Confirm the whole integration survived the upgrade
+# 7. Confirm the whole integration survived the upgrade
 pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath . -CheckOnly
 
-# 7. Re-verify (section 6), then restart every agent
+# 8. Re-verify (section 6), then restart every agent
 ```
+
+### Why step 3 exists
+
+Gortex carries its instruction text and its skills **inside the binary**. Only Claude Code consumes them live — `~\.claude\CLAUDE.md` is a 386-byte stub that `@`-includes `~\.gortex\instructions\active.md`, so a profile switch or an upgrade reaches it immediately.
+
+Every other agent holds an inlined **copy**, frozen when it was written. Nothing re-synchronises them, so after an upgrade Claude looks correct while Codex, Copilot, and OpenCode quietly serve the old text. `Update-GortexAgents.ps1` closes that gap:
+
+```
+gortex upgrade --run          the only step that uses the network
+   ↓
+gortex instructions regen     rewrites core/localization/full.md from the binary
+   ↓
+instructions switch <p>       copies the chosen profile to active.md
+   ↓
+Claude       @-includes active.md          follows automatically
+Codex/Copilot/OpenCode                     inlined copies — this script
+```
+
+"Latest" therefore means *the installed binary*, not the network. Pass `-Upgrade` to fetch a newer Gortex first, and `-Profile <name>` to switch profiles machine-wide instead of only for Claude:
+
+```powershell
+C:\huginn\Update-GortexAgents.ps1 -WhatIf              # show what would change
+C:\huginn\Update-GortexAgents.ps1 -Upgrade             # fetch, then propagate
+C:\huginn\Update-GortexAgents.ps1 -Profile localization
+```
+
+It rewrites only the span between the `gortex:rules` markers, so YAML frontmatter and your own house rules are preserved byte for byte, and it backs up any file it changes. A file with no block is **skipped, never appended to** — adding one would hand an agent a second copy of the rules when another file in the same tree already carries it.
+
+For skills, the mirror uses junctions, so edits to an existing skill already propagate. What does not is a skill *added* or *removed* by an upgrade: a new one has no junction and a removed one leaves a dangling link. Step 3 re-runs the source install and then re-mirrors with `-Prune`, reporting the delta:
+
+```
+[update] Skills in source: 22 (added 1, removed 0)
+  added:   gortex-new-skill
+```
+
+It uses `--no-hooks --no-claude-md`, because a plain `gortex install` re-adds its own `[[hooks.*]]` blocks on every run — that is how duplicate `PreToolUse` entries accumulate in `~\.codex\config.toml`.
 
 What to watch for:
 
 - **New hook events.** If `gortex install --print-config` shows an event the kit does not wire, decide whether the gate belongs there. The gate belongs on prompt submission, not on tool calls.
 - **New skills.** They land in `~\.claude\skills` and the junction mirror picks them up on the next `Sync-AgentSkills.ps1 -Prune`.
 - **A restarted daemon.** `gortex upgrade` bounces it, and an upgrade that changes the store format can leave the index rebuilding. Step 6 catches both; without it the first symptom is an agent that silently answers nothing.
-- **A rewritten instruction profile.** An upgrade can ship new profile text, which makes the inlined Copilot copy stale exactly as a manual `instructions switch` does (section 12). Step 3 already fixes it, and step 6 confirms it.
+- **A rewritten instruction profile.** An upgrade can ship new profile text, which makes every inlined copy stale exactly as a manual `instructions switch` does (section 12). Step 3 fixes it, and step 7 confirms it.
 - **Native worktree support.** When it ships, drop the transitional tier entirely.
 - **Store growth.** A major index-format change can rebuild everything; check `StoreHealth` afterwards.
 
@@ -637,6 +676,7 @@ C:\huginn\
 ├─ README.md                         short overview; points here
 ├─ .gitignore
 ├─ Install-GortexAgentKit.ps1        detects agents, wires hooks, mirrors skills
+├─ Update-GortexAgents.ps1           propagates the binary's instructions + skills after an upgrade
 ├─ Repair-GortexAgentKit.ps1        diagnoses + fixes daemon, tracking, index, wiring
 ├─ Analyze-RepoExclusions.ps1        derives per-repo exclusions
 ├─ Sync-AgentSkills.ps1              mirrors Gortex skills to Copilot CLI + Codex
@@ -661,7 +701,7 @@ MCP and instructions are separate from the hook wiring:
 |---|---|---|
 | `~\.copilot\mcp-config.json` | `mcpServers.gortex` | Copilot CLI **and** the VS Code agent host |
 | `%APPDATA%\Code\User\mcp.json` | `servers.gortex` | the native Copilot Chat panel |
-| `~\.copilot\copilot-instructions.md` | delimited `gortex:rules` block | all three Copilot surfaces |
+| `~\.copilot\copilot-instructions.md`<br>or `~\.copilot\instructions\*.md` | delimited `gortex:rules` block | all three Copilot surfaces — **both paths load, see section 14** |
 
 Only the `gortex` entry and the delimited block are kit-owned; every other server, the VS Code `inputs` array, and any instructions you write around the block are preserved untouched.
 
@@ -681,6 +721,7 @@ Gortex writes the Claude and Codex equivalents itself (`~\.claude\CLAUDE.md`, `~
 
 - **Windows only.** Every script is PowerShell. The gate would port to bash, but the adapters would need rewriting.
 - **Claude Code runs hooks through POSIX `sh` on Windows**, not `cmd`. That is why its hook command is shell script invoking `claude-hook.cmd`, which `sh` can exec directly.
+- **Copilot loads two instruction files at once.** `~\.copilot\copilot-instructions.md` **and** `~\.copilot\instructions\*.md` are both read in the same session — verified by planting a sentinel token in one and having a fresh `copilot -p` session echo it back alongside a value only the other file carries. Writing the canonical file blind would therefore hand the model the same rule block twice on any machine that already keeps one under `instructions\`, and the two copies would drift apart at the next profile switch. The installer reuses whichever file already owns the block; `Update-GortexAgents.ps1` refreshes every file that carries it.
 - **Gortex's agent name is `claude-code`**; its hook wire-protocol flag is `--agent=claude`. Two different namespaces.
 - **Copilot CLI has no Gortex adapter**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned, and its MCP server and rule block are kit-written too. `gortex install` has no `copilot` target — passing one is an error.
 - **Copilot in VS Code shells out to the CLI.** Its bootstrapper lives at `%APPDATA%\Code\User\globalStorage\github.copilot-chat\copilotCli\copilot.ps1`; it resolves the real `copilot` binary on PATH, version-checks it, and execs it with an unmodified environment. Hooks, skills, and instructions therefore need no second wiring — **only MCP does**, because the Chat panel reads `%APPDATA%\Code\User\mcp.json` instead.

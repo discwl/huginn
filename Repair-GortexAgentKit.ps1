@@ -435,7 +435,21 @@ function Get-WiringDrift {
     # detector -- everything still "works", it just tells the model the wrong
     # thing. Comparing bodies is what turns that into a visible failure.
     $active = Join-Path $ConfigRoot '.gortex\instructions\active.md'
+    # Not just the canonical path: Copilot loads ~\.copilot\copilot-instructions.md
+    # AND ~\.copilot\instructions\*.md in the same session, and the installer
+    # deliberately reuses whichever one already owns the block rather than
+    # creating a second copy. Checking only the canonical name reports
+    # "instructions file missing" on a machine that is in fact correctly wired.
     $copilotInstructions = Join-Path $ConfigRoot '.copilot\copilot-instructions.md'
+    if (-not (Test-Path -LiteralPath $copilotInstructions -PathType Leaf)) {
+        $owning = @(
+            Get-ChildItem -LiteralPath (Join-Path $ConfigRoot '.copilot\instructions') `
+                -File -Filter '*.md' -ErrorAction SilentlyContinue |
+                Where-Object { (Read-TextFile $_.FullName) -match '<!-- gortex:rules:start -->' } |
+                Sort-Object Name
+        )
+        if ($owning.Count -gt 0) { $copilotInstructions = $owning[0].FullName }
+    }
     if (Test-Path -LiteralPath $active -PathType Leaf) {
         if (-not (Test-Path -LiteralPath $copilotInstructions -PathType Leaf)) {
             $drift.Add('Copilot instructions file missing')
