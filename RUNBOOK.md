@@ -65,6 +65,8 @@ gortex daemon status
 gortex daemon start --detach   # only if it is not running
 ```
 
+> On a fresh machine the installer's closing version banner emits `Error: daemon not reachable ... is it running?`. That is the installer probing a daemon that does not exist yet, not a failed install. Start it as above.
+
 Clone the kit to the **same absolute path on every machine** so `paseo.json` and hook commands stay portable:
 
 ```powershell
@@ -114,7 +116,9 @@ Expect `21 skill(s) mirrored` on a fresh machine. `0` means seeding was skipped 
 
 This is a workaround for Gortex distributing skills to one adapter only. When upstream ships skills for the other agents, drop the mirror and read section 11.
 
-It is **idempotent** — a second run reports `already current` and writes nothing. It backs up every file it modifies as `<name>.bak-<timestamp>`.
+It is **idempotent** — a second run reports `already current` for every agent and writes nothing. It backs up every file it modifies as `<name>.bak-<timestamp>`.
+
+Idempotency costs one deliberate compromise on Codex. `gortex install --agents codex` unconditionally re-adds its own `[[hooks.UserPromptSubmit]]` block, which the gate then has to strip again, so re-running it every time would rewrite `config.toml` and strand another backup on every install. The installer therefore seeds the Codex hook table only once — when `config.toml` has no `hook --agent=codex` command yet. **Pass `-Force` after upgrading Gortex** to re-seed it and pick up a changed hook table (section 11).
 
 Useful switches:
 
@@ -133,12 +137,21 @@ Useful switches:
 
 ---
 
-## 5. Configure exclusions per repository
+## 5. Track each repository, then configure its exclusions
+
+Gortex indexes only repositories it has been told about, and a fresh install tracks none. **Register the repo first** — the exclusion block below, and the gate itself, both key off the entry this creates:
+
+```powershell
+cd C:\Path\To\YourRepo
+gortex track .
+gortex repos          # confirm it appears, and watch FRESHNESS reach 'fresh'
+```
+
+Tracking returns in seconds; the first index runs in the background. Until the repo is tracked the gate reports `State: Untracked` and allows every prompt through, because an untracked cwd is indistinguishable from ordinary work outside a checkout.
 
 Exclusions differ per repo, so derive them rather than guessing.
 
 ```powershell
-cd C:\Path\To\YourRepo
 C:\huginn\Analyze-RepoExclusions.ps1 -RepositoryPath .
 ```
 
@@ -181,7 +194,7 @@ Tuning:
 
 ## 6. Verify
 
-Run all of these. Every one should pass.
+Run all of these against a **tracked** repository (section 5) — against an untracked one, check 1 correctly returns `Untracked` rather than `Ready`. Every check should pass.
 
 ```powershell
 # 1. Gate resolves a tracked repo
@@ -206,8 +219,10 @@ Select-String "$HOME\.codex\config.toml" -Pattern 'codex-hook.ps1'
   ForEach-Object { $_.hooks[0].command } | Select-String 'gortex'
 
 # 5. OpenCode plugin control flow (requires node)
+#    Use the deployed copy if OpenCode is wired, otherwise the kit's source.
 $plugin = Join-Path $env:TEMP 'gortex-plugin-test.mjs'
-Copy-Item "$HOME\.config\opencode\plugin\gortex-context.js" $plugin -Force
+$deployed = "$HOME\.config\opencode\plugin\gortex-context.js"
+Copy-Item $(if (Test-Path $deployed) { $deployed } else { 'C:\huginn\plugin\gortex-context.js' }) $plugin -Force
 node C:\huginn\tests\opencode-plugin.test.mjs ([Uri](Resolve-Path $plugin).Path).AbsoluteUri (Get-Location).Path
 # expect: 8 passed, 0 failed
 ```
@@ -456,15 +471,15 @@ Gortex moves fast and `gortex install` can overwrite hook wiring. Run this drill
 
 ```powershell
 # 1. Record the current state
-gortex --version
+gortex version
 (Get-ChildItem "$HOME\.claude\skills" -Directory -Filter 'gortex-*').Name | Set-Content "$env:TEMP\skills-before.txt"
 
-# 2. Upgrade
-winget upgrade --id gortex   # or your install method
-gortex --version
+# 2. Upgrade — gortex updates itself using the method it was installed with
+gortex upgrade
+gortex version
 
-# 3. Re-assert kit wiring (idempotent; reports what changed)
-C:\huginn\Install-GortexAgentKit.ps1
+# 3. Re-assert kit wiring. -Force re-seeds the Codex hook table (section 4).
+C:\huginn\Install-GortexAgentKit.ps1 -Force
 
 # 4. Diff the skill set — new skills appear here first
 (Get-ChildItem "$HOME\.claude\skills" -Directory -Filter 'gortex-*').Name | Set-Content "$env:TEMP\skills-after.txt"
@@ -512,6 +527,9 @@ Then restart the agents. If seeding writes nothing, `gortex` is not on PATH — 
 **Setup looks frozen with no output.**
 `gortex daemon reload` scales with store size and has been observed taking 32 s to 4.5 minutes. The helper heartbeats through it. **Trust `~\.gortex\logs\worktree-*.log`, never the terminal pane** — panes go stale independently.
 
+**The gate always reports `State: Untracked` and never waits.**
+The repository was never registered. `gortex track .` in the repo root, then confirm with `gortex repos` (section 5). A fresh Gortex install tracks nothing, and the gate deliberately allows an untracked cwd rather than blocking work outside a checkout.
+
 **Status shows `IndexState=PendingOrIndexing` forever.**
 Check that the repo has exclusions. Without them, generated code can dominate the index. Run the analyzer and reload.
 
@@ -531,6 +549,8 @@ Confirm you edited `~\.gortex\agent-hooks\*`, not the kit folder. The installer 
 ```
 C:\huginn\
 ├─ RUNBOOK.md                        this file
+├─ README.md                         short overview; points here
+├─ .gitignore
 ├─ Install-GortexAgentKit.ps1        detects agents, wires hooks, mirrors skills
 ├─ Analyze-RepoExclusions.ps1        derives per-repo exclusions
 ├─ Sync-AgentSkills.ps1              mirrors Gortex skills to Copilot CLI + Codex

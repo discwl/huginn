@@ -288,7 +288,17 @@ if ($selected -contains 'codex') {
     # Gortex owns the shape of the [hooks] table, so it writes the block first
     # and only the gated event is re-pointed afterwards. Hand-authoring the
     # whole table would drift from whatever the current Gortex release expects.
-    if ($gortexExe -and -not $SkipGortexInstall -and $PSCmdlet.ShouldProcess('codex', "gortex install --hook-mode $HookMode")) {
+    #
+    # It is seeded once rather than on every run. `gortex install` unconditionally
+    # re-adds its own [[hooks.UserPromptSubmit]] block, which the gate then strips
+    # again, so re-running it would rewrite config.toml — and strand another
+    # timestamped backup — on every single install. Use -Force after upgrading
+    # Gortex to pick up a changed hook table.
+    $codexSeeded = (Test-Path -LiteralPath $codexConfig -PathType Leaf) -and
+                   ((Get-Content -LiteralPath $codexConfig -Raw) -match 'hook\s+--agent=codex')
+
+    if ($gortexExe -and -not $SkipGortexInstall -and (-not $codexSeeded -or $Force) -and
+        $PSCmdlet.ShouldProcess('codex', "gortex install --hook-mode $HookMode")) {
         & $gortexExe install --agents codex --hook-mode $HookMode --yes 2>&1 | Out-Null
     }
 

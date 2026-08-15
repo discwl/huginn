@@ -301,8 +301,13 @@ else {
     Write-Host '  none found'
 }
 
-$excludedBytes = ($excludeCandidates | Measure-Object -Property Bytes -Sum).Sum
-if ($null -eq $excludedBytes) { $excludedBytes = 0 }
+# Measure-Object returns nothing at all for an empty pipeline, and Set-StrictMode
+# turns the resulting $null.Sum into a terminating error — so a repository with no
+# exclude candidates would crash here instead of printing its re-include block.
+$excludedBytes = 0
+if ($excludeCandidates.Count -gt 0) {
+    $excludedBytes = ($excludeCandidates | Measure-Object -Property Bytes -Sum).Sum
+}
 
 Write-Host ('[analyze] Applying every suggestion removes {0:N1} MB of {1:N1} MB ({2:N0}%).' -f `
     ($excludedBytes / 1MB), ($totalBytes / 1MB), (100 * $excludedBytes / [Math]::Max(1, $totalBytes)))
