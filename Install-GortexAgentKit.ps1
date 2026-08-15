@@ -11,7 +11,13 @@
     nothing and quietly falls back to raw file reads. Gortex also installs
     skills for Claude Code only, leaving Copilot CLI and Codex without them.
 
-    This installer closes both gaps for every agent found on the machine.
+    Neither Copilot surface gets MCP from Gortex at all. Gortex has no Copilot
+    CLI adapter, and its `vscode` adapter writes a repo-local .vscode\mcp.json
+    rather than the VS Code user profile. Both surfaces otherwise end up with
+    hooks and skills but no graph tools, so this installer registers the MCP
+    server for them directly.
+
+    This installer closes all three gaps for every agent found on the machine.
 
     Hook runtime files are copied into ~/.gortex/agent-hooks rather than being
     referenced in place, so a moved or deleted kit folder cannot break a working
@@ -52,7 +58,7 @@
 param(
     [string] $KitRoot = $PSScriptRoot,
 
-    [ValidateSet('auto', 'claude-code', 'copilot', 'codex', 'opencode')]
+    [ValidateSet('auto', 'claude-code', 'copilot', 'codex', 'opencode', 'vscode')]
     [string[]] $Agents = @('auto'),
 
     [ValidateSet('enrich', 'deny', 'consult-unlock', 'nudge')]
@@ -114,6 +120,30 @@ function Backup-File {
     }
 }
 
+# Text I/O goes through .NET rather than Get-Content/Set-Content because this
+# installer has to behave identically under Windows PowerShell 5.1 and pwsh 7,
+# and those two disagree about encoding. In 5.1 `Get-Content` decodes a
+# BOM-less file as ANSI, so the em dashes in the Gortex instruction profile come
+# back as "a€"" and get written straight back out that way; `-Encoding UTF8`
+# then emits a BOM that pwsh 7 would not. Reading and writing UTF-8 without a
+# BOM explicitly is the only way both shells produce a byte-identical file --
+# which idempotency depends on, since the content comparison below is what
+# decides whether anything is rewritten at all.
+$script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
+
+function Read-TextFile {
+    param([string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    return [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+}
+
+function Write-TextFile {
+    param([string] $Path, [string] $Content)
+
+    [IO.File]::WriteAllText($Path, $Content, $script:Utf8NoBom)
+}
+
 # Writing only on change keeps the installer idempotent and avoids churning a
 # backup file on every run.
 function Set-ManagedContent {
@@ -124,7 +154,7 @@ function Set-ManagedContent {
     )
 
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        $existing = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+        $existing = Read-TextFile $Path
         if ($null -ne $existing -and $existing.TrimEnd() -eq $Content.TrimEnd() -and -not $Force) {
             return $false
         }
@@ -139,7 +169,7 @@ function Set-ManagedContent {
     }
 
     if ($PSCmdlet.ShouldProcess($Path, 'Write file')) {
-        Set-Content -LiteralPath $Path -Value $Content -Encoding UTF8 -NoNewline:$false
+        Write-TextFile -Path $Path -Content ($Content.TrimEnd() + [Environment]::NewLine)
     }
 
     return $true
@@ -156,6 +186,149 @@ function Resolve-Executable {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     return $null
+}
+
+# The MCP server stanza. Deliberately minimal, and deliberately the bare command
+# rather than a resolved path: this is the exact shape Gortex's own adapters
+# write for Codex and Claude Code, so all four agents end up pointing at one
+# server definition that survives a Gortex upgrade moving the executable.
+function New-GortexMcpEntry {
+    return [ordered]@{
+        type    = 'stdio'
+        command = 'gortex'
+        args    = @('mcp')
+    }
+}
+
+# Registers the Gortex MCP server in a shared JSON config.
+#
+# These files belong to the agent, not to this kit: they already hold unrelated
+# servers, and in VS Code's case an `inputs` array too. So only the gortex entry
+# is touched, only the keys above are managed, and any other key found on that
+# entry is left exactly as it was.
+#
+# The write is skipped entirely when every managed key already matches. Blindly
+# reserializing would reflow the whole document -- VS Code's file is tab
+# indented, ours would not be -- and strand a fresh timestamped backup on every
+# single run, which is the same non-idempotency the Codex path had to fix.
+function Merge-McpServer {
+    param(
+        [string] $Path,
+        [string] $ContainerKey,
+        [System.Collections.IDictionary] $Entry
+    )
+
+    $config = $null
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $raw = Read-TextFile $Path
+        if (-not [string]::IsNullOrWhiteSpace($raw)) {
+            try {
+                # -AsHashtable is not optional here. Copilot config files can
+                # carry keys that differ only by case, which the object-mode
+                # parser rejects outright rather than merging.
+                $config = $raw | ConvertFrom-Json -AsHashtable
+            }
+            catch {
+                Write-Warning "Could not parse $Path : $($_.Exception.Message)"
+                Write-Detail 'Left untouched. Fix the JSON and re-run to register the MCP server.'
+                return 'parse failed'
+            }
+        }
+    }
+
+    if ($null -eq $config) { $config = [ordered]@{} }
+
+    if (-not $config.Contains($ContainerKey) -or $null -eq $config[$ContainerKey]) {
+        $config[$ContainerKey] = [ordered]@{}
+    }
+    $servers = $config[$ContainerKey]
+
+    $changed = $false
+    if (-not $servers.Contains('gortex') -or $null -eq $servers['gortex']) {
+        $servers['gortex'] = $Entry
+        $changed = $true
+    }
+    else {
+        $current = $servers['gortex']
+        foreach ($key in $Entry.Keys) {
+            $want = ConvertTo-Json $Entry[$key] -Depth 20 -Compress
+            $have = $null
+            if ($current.Contains($key)) {
+                $have = ConvertTo-Json $current[$key] -Depth 20 -Compress
+            }
+            if ($have -ne $want) {
+                $current[$key] = $Entry[$key]
+                $changed = $true
+            }
+        }
+    }
+
+    if (-not $changed -and -not $Force) { return 'already current' }
+
+    $json = $config | ConvertTo-Json -Depth 100
+    if (Set-ManagedContent -Path $Path -Content $json) {
+        Write-Detail "registered gortex MCP server in $Path"
+        return 'wired'
+    }
+
+    return 'already current'
+}
+
+# Writes the Gortex rule block into a Markdown instructions file.
+#
+# Gortex has a `--claude-md` flag that does this for Claude Code and nothing
+# equivalent for Copilot, so Copilot gets the MCP server and the skills but is
+# never actually told to prefer graph queries over Read/Grep/Glob.
+#
+# The body is *inlined* rather than @-imported. Claude's block is a one-line
+# `@<path>` pointer into ~/.gortex/instructions, but the Copilot CLI has no
+# import resolution at all -- it would ship that line to the model as literal
+# text and the rules would silently never apply. Inlining means the block is a
+# copy, so re-running the installer is what picks up `gortex instructions
+# switch`; the body is compared on every run, so that needs no -Force.
+#
+# Only the delimited block is owned. Anything the user wrote around it survives,
+# because this file is a plausible place to keep unrelated personal instructions.
+function Merge-InstructionBlock {
+    param(
+        [string] $Path,
+        [string] $Body
+    )
+
+    $startMark = '<!-- gortex:rules:start -->'
+    $endMark = '<!-- gortex:rules:end -->'
+
+    $block = @(
+        $startMark,
+        '<!-- Managed by Install-GortexAgentKit.ps1. Edits inside this block are overwritten.',
+        '     Re-run the installer after `gortex instructions switch` to refresh it. -->',
+        $Body.Trim(),
+        $endMark
+    ) -join [Environment]::NewLine
+
+    $existing = ''
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $existing = Read-TextFile $Path
+        if ($null -eq $existing) { $existing = '' }
+    }
+
+    if ($existing -match [regex]::Escape($startMark)) {
+        $pattern = '(?s)' + [regex]::Escape($startMark) + '.*?' + [regex]::Escape($endMark)
+        $updated = [regex]::Replace($existing, $pattern, { $block }, 1)
+    }
+    elseif ([string]::IsNullOrWhiteSpace($existing)) {
+        $updated = $block + [Environment]::NewLine
+    }
+    else {
+        $updated = $existing.TrimEnd() + [Environment]::NewLine * 2 + $block + [Environment]::NewLine
+    }
+
+    if (Set-ManagedContent -Path $Path -Content $updated) {
+        Write-Detail "wrote rule block to $Path"
+        return 'wired'
+    }
+
+    return 'already current'
 }
 
 # --- locate the pieces -------------------------------------------------------
@@ -198,6 +371,7 @@ $detected = [ordered]@{
     'copilot'     = (Test-Path -LiteralPath (Join-Path $ConfigRoot '.copilot') -PathType Container) -or [bool](Resolve-Executable 'copilot')
     'codex'       = (Test-Path -LiteralPath (Join-Path $ConfigRoot '.codex') -PathType Container) -or [bool](Resolve-Executable 'codex')
     'opencode'    = (Test-Path -LiteralPath (Join-Path $ConfigRoot '.config\opencode') -PathType Container) -or [bool](Resolve-Executable 'opencode')
+    'vscode'      = (Test-Path -LiteralPath (Join-Path $ConfigRoot 'AppData\Roaming\Code\User') -PathType Container) -or [bool](Resolve-Executable 'code')
 }
 
 if ($Agents -contains 'auto') {
@@ -221,7 +395,7 @@ foreach ($agent in $selected) {
 Write-Step 'Deploying hook runtime.'
 $deployed = 0
 foreach ($file in $requiredHooks) {
-    $content = Get-Content -LiteralPath (Join-Path $hookSource $file) -Raw
+    $content = Read-TextFile (Join-Path $hookSource $file)
     if (Set-ManagedContent -Path (Join-Path $hookTarget $file) -Content $content) {
         $deployed++
         Write-Detail "updated $file"
@@ -268,13 +442,103 @@ if ($selected -contains 'copilot') {
 
     $json = $payload | ConvertTo-Json -Depth 10
     $path = Join-Path $ConfigRoot '.copilot\hooks\gortex.json'
-    if (Set-ManagedContent -Path $path -Content $json) {
-        Set-Result 'copilot' 'wired' "gate timeout ${GateTimeoutSec}s"
+    $hookState = if (Set-ManagedContent -Path $path -Content $json) {
         Write-Detail "wrote $path"
+        'wired'
     }
     else {
-        Set-Result 'copilot' 'already current' ''
-        Write-Detail 'already current'
+        Write-Detail 'hooks already current'
+        'already current'
+    }
+
+    # Gortex has no Copilot CLI adapter, so `gortex install` never registers the
+    # MCP server here no matter which agents are passed to it. Without this the
+    # CLI gets the readiness gate and the mirrored skills but no graph tools,
+    # and every skill it just learned about fails the moment it is invoked.
+    $mcpState = Merge-McpServer -Path (Join-Path $ConfigRoot '.copilot\mcp-config.json') `
+        -ContainerKey 'mcpServers' -Entry (New-GortexMcpEntry)
+
+    # Instructions are the one surface every Copilot runtime genuinely shares.
+    # The CLI resolves ~\.copilot\copilot-instructions.md itself, and VS Code's
+    # Chat panel independently searches the same path -- its prompt loader calls
+    # findFilesInRoots([userHome], ".copilot", [{fileName:"copilot-instructions.md"}])
+    # alongside the workspace .github lookup. One file therefore covers the
+    # terminal CLI, the VS Code agent host, and the native Chat panel, so it is
+    # written once here rather than again in the vscode section.
+    $instrState = 'skipped'
+    $activeInstructions = Join-Path $ConfigRoot '.gortex\instructions\active.md'
+    if (Test-Path -LiteralPath $activeInstructions -PathType Leaf) {
+        $instrState = Merge-InstructionBlock `
+            -Path (Join-Path $ConfigRoot '.copilot\copilot-instructions.md') `
+            -Body (Read-TextFile $activeInstructions)
+        Write-Detail "instructions: $instrState"
+    }
+    else {
+        Write-Detail 'instructions: skipped (no active Gortex profile yet)'
+    }
+
+    if ($hookState -eq 'wired' -or $mcpState -eq 'wired' -or $instrState -eq 'wired') {
+        Set-Result 'copilot' 'wired' "gate ${GateTimeoutSec}s; mcp $mcpState; rules $instrState"
+    }
+    else {
+        Set-Result 'copilot' 'already current' "mcp $mcpState; rules $instrState"
+    }
+}
+
+# --- Copilot in VS Code ------------------------------------------------------
+
+if ($selected -contains 'vscode') {
+    Write-Step 'Wiring Copilot in VS Code.'
+
+    # `gortex install --agents vscode` writes a *repo-local* .vscode\mcp.json,
+    # which only ever covers whichever folder happened to be open when it ran.
+    # The user profile is what makes the graph available in every workspace, so
+    # that is what is written here.
+    #
+    # This is MCP only. The native Copilot Chat panel exposes no hook API, so it
+    # cannot be gated on index readiness the way the CLI agents are -- the tools
+    # are simply present, and answer nothing until the index is ready.
+    #
+    # Instructions are not written here either. The agent host execs the same
+    # `copilot` binary as the terminal CLI, and the native Chat panel reads
+    # ~\.copilot\copilot-instructions.md directly, so the copilot section has
+    # already covered both. MCP is the only part of the configuration these
+    # surfaces do not share, which is exactly why it is the only part repeated
+    # here.
+    #
+    # The panel honours that file only while
+    # `github.copilot.chat.codeGeneration.useInstructionFiles` is true. That is
+    # the default, and forcing it in settings.json would mean owning a file the
+    # user edits by hand, so it is left alone and called out in the runbook.
+    $vscodeRoots = [ordered]@{
+        'VS Code'          = Join-Path $ConfigRoot 'AppData\Roaming\Code\User\mcp.json'
+        'VS Code Insiders' = Join-Path $ConfigRoot 'AppData\Roaming\Code - Insiders\User\mcp.json'
+    }
+
+    $states = @()
+    foreach ($name in $vscodeRoots.Keys) {
+        $target = $vscodeRoots[$name]
+
+        # Only write into a profile that exists. Creating the Insiders tree on a
+        # machine that has never run Insiders would leave a config for an editor
+        # that is not installed.
+        $userDir = Split-Path -Parent $target
+        if (-not (Test-Path -LiteralPath $userDir -PathType Container)) { continue }
+
+        $state = Merge-McpServer -Path $target -ContainerKey 'servers' -Entry (New-GortexMcpEntry)
+        Write-Detail "$name : $state"
+        $states += $state
+    }
+
+    if ($states.Count -eq 0) {
+        Set-Result 'vscode' 'skipped' 'no VS Code user profile found'
+        Write-Detail 'no VS Code user profile found'
+    }
+    elseif ($states -contains 'wired') {
+        Set-Result 'vscode' 'wired' 'user-profile MCP; restart VS Code'
+    }
+    else {
+        Set-Result 'vscode' 'already current' ''
     }
 }
 
@@ -295,7 +559,7 @@ if ($selected -contains 'codex') {
     # timestamped backup — on every single install. Use -Force after upgrading
     # Gortex to pick up a changed hook table.
     $codexSeeded = (Test-Path -LiteralPath $codexConfig -PathType Leaf) -and
-                   ((Get-Content -LiteralPath $codexConfig -Raw) -match 'hook\s+--agent=codex')
+                   ((Read-TextFile $codexConfig) -match 'hook\s+--agent=codex')
 
     if ($gortexExe -and -not $SkipGortexInstall -and (-not $codexSeeded -or $Force) -and
         $PSCmdlet.ShouldProcess('codex', "gortex install --hook-mode $HookMode")) {
@@ -310,7 +574,7 @@ if ($selected -contains 'codex') {
         $toml = ''
     }
     else {
-        $toml = Get-Content -LiteralPath $codexConfig -Raw
+        $toml = Read-TextFile $codexConfig
     }
 
     $gateCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-PosixPath $codexHook)"
@@ -361,7 +625,7 @@ if ($selected -contains 'claude-code') {
     $settingsPath = Join-Path $ConfigRoot '.claude\settings.json'
     $settings = $null
     if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
-        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        $settings = Read-TextFile $settingsPath | ConvertFrom-Json
     }
     if ($null -eq $settings) {
         $settings = [pscustomobject]@{}
@@ -424,7 +688,7 @@ if ($selected -contains 'opencode') {
     }
     else {
         $target = Join-Path $ConfigRoot '.config\opencode\plugin\gortex-context.js'
-        $content = Get-Content -LiteralPath $pluginFile -Raw
+        $content = Read-TextFile $pluginFile
         if (Set-ManagedContent -Path $target -Content $content) {
             Set-Result 'opencode' 'wired' ''
             Write-Detail "wrote $target"

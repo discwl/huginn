@@ -2,12 +2,14 @@
 
 Workstation setup kit for [Gortex](https://gortex.dev) across **Claude Code, GitHub Copilot CLI, Copilot in VS Code, Codex, and OpenCode** on Windows.
 
-Five names, four runtimes — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its hooks and skills, so wiring Copilot CLI covers both.
+Five names, four hook runtimes — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its hooks and skills, so wiring Copilot CLI covers both. MCP is the exception: the Chat panel is a separate runtime with its own server registry. Instructions go the other way — all three Copilot surfaces read `~\.copilot\copilot-instructions.md`, so one file covers the lot.
 
-Gortex installs MCP servers and hooks on its own. This kit closes three gaps it leaves open:
+Gortex installs MCP servers and hooks on its own — but not for either Copilot surface. This kit closes five gaps it leaves open:
 
 - **Nothing checks whether a repository has finished indexing.** Registration takes seconds; a first index can take 15–20 minutes. In between, every graph query returns nothing and the agent silently falls back to raw file reads. The kit adds a readiness gate that waits.
 - **Skills install for Claude Code only.** Copilot CLI and Codex get none. The kit mirrors them.
+- **Neither Copilot surface gets the MCP server.** Gortex has no Copilot CLI adapter at all, and its `vscode` adapter writes a *repo-local* `.vscode\mcp.json` instead of the user profile. Both end up with skills that fail the moment they are invoked. The kit registers the server in `~\.copilot\mcp-config.json` and `%APPDATA%\Code\User\mcp.json`.
+- **Copilot is never told to prefer the graph.** `gortex install --claude-md` writes the rule block for Claude Code and there is no Copilot equivalent, so Copilot gets the tools and the skills but no instruction to use them. The kit writes `~\.copilot\copilot-instructions.md`.
 - **Exclusions are hand-guessed per repository.** The kit derives them from the repo itself.
 
 ## Install
@@ -29,7 +31,8 @@ Full instructions, per-repo configuration, verification, and troubleshooting are
 
 | Path | Purpose |
 |---|---|
-| `Install-GortexAgentKit.ps1` | Detects agents, wires the gate, mirrors skills. Idempotent, supports `-WhatIf` |
+| `Install-GortexAgentKit.ps1` | Detects agents, wires the gate, registers MCP for both Copilot surfaces, writes Copilot's rule block, mirrors skills. Idempotent, supports `-WhatIf` |
+| `Repair-GortexAgentKit.ps1` | Diagnoses and repairs the whole integration — daemon, tracking, index, hooks, MCP, instructions, skills. `-CheckOnly` makes it a health probe |
 | `Analyze-RepoExclusions.ps1` | Derives per-repo exclusions from tracked content |
 | `Sync-AgentSkills.ps1` | Mirrors Gortex skills to Copilot CLI and Codex |
 | `hooks/gortex-readiness.ps1` | The readiness gate — single source of truth |

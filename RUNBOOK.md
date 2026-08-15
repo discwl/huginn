@@ -2,7 +2,7 @@
 
 Portable setup for **Gortex** (code-graph daemon + MCP server) across **Claude Code, GitHub Copilot CLI, Copilot in VS Code, Codex, and OpenCode** on Windows.
 
-Those five names are **four runtimes** — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its configuration, so wiring Copilot CLI covers both. See section 4.
+Those five names are **four hook runtimes** — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its hooks, skills, and instructions, so wiring Copilot CLI covers both. MCP is the one exception: the two surfaces read **different** MCP config files, and both are wired separately. See section 4.
 
 This runbook is written to be executed by an agent. Hand it, plus the `C:\huginn` folder, to a coding agent on the target machine and say:
 
@@ -14,15 +14,18 @@ It is equally usable by a human — every step is a real command.
 
 ## 1. What this kit adds
 
-Gortex installs MCP servers and hooks on its own. This kit closes three gaps it leaves open:
+Gortex installs MCP servers and hooks on its own — but not for either Copilot surface. This kit closes four gaps it leaves open:
 
 | Gap | Consequence | Fixed by |
 |---|---|---|
 | Nothing checks whether the repo has finished indexing | Agents start against an empty graph and silently fall back to raw file reads | `hooks\gortex-readiness.ps1` + per-agent adapters |
 | Skills install for Claude Code only | Copilot CLI and Codex get no Gortex skills | `Sync-AgentSkills.ps1` |
+| Neither Copilot surface gets the MCP server or the rule block | Copilot has Gortex skills but no Gortex tools, and is never told to prefer the graph | `Install-GortexAgentKit.ps1` (`copilot` + `vscode`) |
 | Exclusions are hand-guessed per repo | Generated code dominates the index and slows it dramatically | `Analyze-RepoExclusions.ps1` |
 
 The readiness gap is the important one. **Registration and indexing are separate states.** A repository is tracked within seconds; its first index can take 15–20 minutes on a large repo. In between, every graph query returns nothing and the agent has no way to tell that apart from "no results".
+
+The MCP gap is the quietest one. `gortex install --agents auto` looks like it covers everything, but its adapter list has **no `copilot` entry at all** (`claude-code, cursor, aider, antigravity, cline, codex, continue, gemini, hermes, kimi, kilocode, kiro, oh-my-pi, opencode, openclaw, pi, vscode, windsurf, zed`), and its `vscode` entry writes a **repo-local** `.vscode\mcp.json` rather than the user profile. Copilot therefore ends up fully gated, fully skilled, and unable to answer a single graph query.
 
 ---
 
@@ -87,22 +90,34 @@ cd C:\huginn
 
 The installer:
 
-1. Detects Claude Code, Copilot CLI, Codex, and OpenCode.
+1. Detects Claude Code, Copilot CLI, Copilot in VS Code, Codex, and OpenCode.
 2. Copies the hook runtime into `~\.gortex\agent-hooks`.
 3. Wires each agent's `UserPromptSubmit` to the readiness gate.
-4. Installs the OpenCode plugin.
-5. Mirrors Gortex skills into `~\.agents\skills`, seeding them first if needed (see below).
+4. Registers the Gortex MCP server for both Copilot surfaces, and writes the Gortex rule block.
+5. Installs the OpenCode plugin.
+6. Mirrors Gortex skills into `~\.agents\skills`, seeding them first if needed (see below).
 
 Only detected agents are wired, so you do not need to name the ones this machine uses. Nothing is installed for an agent that is absent.
 
-**Copilot in VS Code needs no separate wiring.** VS Code does not embed its own copy of the CLI. Its Copilot agent host ships a bootstrapper that locates `copilot` on PATH and execs it with the arguments unchanged, setting no config-dir, `HOME`, or `XDG_*` override. It therefore reads the same `~\.copilot\hooks\gortex.json` and the same `~\.agents\skills` as the terminal CLI, and is gated identically. Wiring Copilot CLI covers both surfaces.
+**Copilot in VS Code shares everything except MCP.** VS Code does not embed its own copy of the CLI. Its Copilot agent host ships a bootstrapper that locates `copilot` on PATH and execs it with the arguments unchanged, setting no config-dir, `HOME`, or `XDG_*` override. It therefore reads the same `~\.copilot\hooks\gortex.json`, the same `~\.agents\skills`, and the same `~\.copilot\copilot-instructions.md` as the terminal CLI, and is gated identically.
+
+**MCP is the exception, and it is the one thing you must wire twice.** The two surfaces read *different* server registries:
+
+| Surface | MCP config | Written by |
+|---|---|---|
+| Copilot CLI + VS Code agent host | `~\.copilot\mcp-config.json` | this kit |
+| Native Copilot Chat panel | `%APPDATA%\Code\User\mcp.json` | this kit |
+
+Gortex writes neither. It has **no `copilot` adapter at all**, and `gortex install --agents vscode` writes a repo-local `.vscode\mcp.json` that only covers whichever folder was open when it ran. The installer writes the user profile instead, so the graph is available in every workspace.
+
+The rule block is written **once**, to `~\.copilot\copilot-instructions.md`, because that file is shared. It is delimited by `<!-- gortex:rules:start -->` / `<!-- gortex:rules:end -->` and anything you write around it is preserved. The profile body is **inlined rather than `@`-imported**: Claude's block is a one-line `@<path>` pointer, but the Copilot CLI has no import resolution and would pass that line to the model as literal text. Re-run the installer after `gortex instructions switch` to refresh it — the body is compared every run, so no `-Force` is needed.
 
 Two consequences worth knowing:
 
 - The host enforces a **minimum Copilot CLI version of 0.0.394** at launch. Below that it refuses to start, and the gate never runs because the CLI never runs.
 - If `copilot` is not on PATH for the VS Code process, the host cannot start at all. A PATH change made after VS Code launched will not be visible to it — restart VS Code, not just the window.
 
-> This covers the Copilot **agent host**. The native Copilot Chat panel is a separate runtime that exposes MCP and instructions but no hook API, so it cannot be gated and is out of scope for this kit.
+> The native Copilot Chat panel is a separate runtime. It exposes MCP and instructions but **no hook API**, so it cannot be gated: its Gortex tools are simply present, and return nothing until the index is ready.
 
 **You do not need Claude Code to get skills.** Gortex writes its skill set for exactly one adapter — Claude Code, under `~\.claude\skills` — and that is the only source the mirror can read. On a machine without Claude, the installer therefore runs the `claude-code` adapter itself purely to produce that directory:
 
@@ -218,6 +233,13 @@ Select-String "$HOME\.codex\config.toml" -Pattern 'codex-hook.ps1'
 (Get-Content "$HOME\.claude\settings.json" -Raw | ConvertFrom-Json).hooks.UserPromptSubmit |
   ForEach-Object { $_.hooks[0].command } | Select-String 'gortex'
 
+# 4b. MCP registered on BOTH Copilot surfaces — they read different files
+copilot mcp get gortex          # expect: Status: Enabled, Command: gortex mcp
+(Get-Content "$env:APPDATA\Code\User\mcp.json" -Raw | ConvertFrom-Json -AsHashtable).servers.gortex.command   # expect: gortex
+
+# 4c. Rule block present (shared by both surfaces, so only one file)
+Select-String "$HOME\.copilot\copilot-instructions.md" -Pattern 'gortex:rules:start'
+
 # 5. OpenCode plugin control flow (requires node)
 #    Use the deployed copy if OpenCode is wired, otherwise the kit's source.
 $plugin = Join-Path $env:TEMP 'gortex-plugin-test.mjs'
@@ -225,6 +247,10 @@ $deployed = "$HOME\.config\opencode\plugin\gortex-context.js"
 Copy-Item $(if (Test-Path $deployed) { $deployed } else { 'C:\huginn\plugin\gortex-context.js' }) $plugin -Force
 node C:\huginn\tests\opencode-plugin.test.mjs ([Uri](Resolve-Path $plugin).Path).AbsoluteUri (Get-Location).Path
 # expect: 8 passed, 0 failed
+
+# 6. All of the above, as one probe
+pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath . -CheckOnly
+# expect: every row Ok, "Gortex integration is healthy.", exit code 0
 ```
 
 The OpenCode test shims `Bun.spawn` onto Node so the plugin calls the **real** gate script — only the runtime is substituted. It proves a ready repo injects no directive, a blocked one injects a STOP directive carrying the gate's reason, orientation text is suppressed while blocked, sessions are cached after the first probe, and tool enrichment never destroys the original tool output.
@@ -370,6 +396,13 @@ Setup emits a heartbeat every 10 seconds with state, elapsed time, timeout, bran
 
 Entries run **sequentially and fail-fast** — a non-zero exit throws and skips the rest. The worktree is preserved on failure (`cleanupOnFailure: false`), so you can inspect it. Each entry runs in its own shell with `cwd` set to the worktree, and the UI reports per-step progress (`2/2`).
 
+On Windows each entry is run as `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "<entry>"` — Windows PowerShell 5.1, not `pwsh`. Two consequences:
+
+- `$env:PASEO_*` **does** expand, which is why the `-SourceCheckoutPath` argument above works.
+- The entry is PowerShell, not a shell line, so `;` really does swallow a failure. That is the mechanism behind the warning below.
+
+Note the asymmetry with the `scripts` block: only `worktree.setup`/`teardown` accept an array. A `scripts.<name>.command` **must be a single string** — Paseo's `getScriptConfigs` silently skips any entry whose `command` is not a string, so an array there yields a script that never appears rather than an error.
+
 Do not chain steps with `;` or `&&` inside one string. Each array entry is invoked directly rather than concatenated into a shell line, and in PowerShell `;` swallows the failure — a broken install would silently continue to the next step.
 
 **Put the Gortex step first.** Paseo starts the agent as soon as the worktree exists and runs setup in the background, so ordering decides what the gate can protect:
@@ -388,9 +421,18 @@ Steps after the Gortex one run once the gate has already released the agent, so 
 New-Item -Force -ItemType File (Join-Path (git rev-parse --absolute-git-dir) 'setup-complete')
 ```
 
-Use `--absolute-git-dir`, which is per-worktree. `--git-common-dir` is shared by every worktree, so a marker there would falsely release all of them. Delete it on teardown.
+Use `--absolute-git-dir`, which is per-worktree. `--git-common-dir` is shared by every worktree, so a marker there would falsely release all of them.
 
-These commands receive `PASEO_WORKTREE_PATH`, `PASEO_BRANCH_NAME`, `PASEO_SOURCE_CHECKOUT_PATH`, `PASEO_WORKSPACE_ID`, and `PASEO_AGENT_CWD`.
+Delete the marker on teardown, and **guard the delete with `Test-Path`**:
+
+```powershell
+# teardown entry — idempotent, exits 0 whether or not the marker exists
+if (Test-Path (Join-Path (git rev-parse --absolute-git-dir) 'setup-complete')) { Remove-Item (Join-Path (git rev-parse --absolute-git-dir) 'setup-complete') -Force }
+```
+
+`Remove-Item -ErrorAction SilentlyContinue` is **not** sufficient here. Suppressing a non-terminating error still leaves `$?` false, so `powershell -Command` exits 1 and Paseo reports the teardown as failed whenever the marker is already gone — which is exactly the case when setup failed before reaching the marker step. `-ErrorAction Ignore` has the same problem. Only avoiding the error entirely gives a clean exit.
+
+These commands receive `PASEO_SOURCE_CHECKOUT_PATH` (the shared original repo root, for copying gitignored local files such as `.env` into the worktree), `PASEO_ROOT_PATH` (a backward-compatible alias for the same value), `PASEO_WORKTREE_PATH`, `PASEO_BRANCH_NAME`, and `PASEO_WORKTREE_PORT`.
 
 ### Complete example — repo-vendored scripts
 
@@ -406,7 +448,7 @@ The blocks above point at the fixed `C:\huginn` install. The alternative is to k
     "gortex-status": {
       "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Status -WorktreePath .\""
     },
-    "gortex-repair": {
+    "gortex-repair-policy": {
       "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Setup -WorktreePath . -SourceCheckoutPath (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim()))\""
     },
     "gortex-wait": {
@@ -417,6 +459,12 @@ The blocks above point at the fixed `C:\huginn` install. The alternative is to k
     },
     "gortex-sync-skills": {
       "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Sync-AgentSkills.ps1') -Prune\""
+    },
+    "gortex-repair": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Repair-GortexAgentKit.ps1') -RepoPath .\""
+    },
+    "gortex-check": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Repair-GortexAgentKit.ps1') -RepoPath . -CheckOnly\""
     }
   },
   "metadataGeneration": {
@@ -447,21 +495,27 @@ Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | O
 
 **Teardown deliberately uses a different form.** It runs `-File` against `$env:PASEO_SOURCE_CHECKOUT_PATH` because by teardown the worktree may already be gone, so `git rev-parse` in the current directory cannot be trusted. Paseo supplies the source checkout directly, so no computation is needed.
 
-The five scripts:
+The seven scripts:
 
-| Script | Action | Purpose |
+| Script | Runs | Purpose |
 |---|---|---|
-| `gortex-status` | `Status` | Reports `Untracked` / `PendingOrIndexing` / `Stale` / `Ready`, plus branch, HEAD, indexed commit, and expected exclusions |
-| `gortex-repair` | `Setup` | Re-asserts durable global policy on an already-tracked worktree |
-| `gortex-wait` | `Wait` | Blocks until `indexed=true`, with the same 10-second heartbeat as setup |
-| `gortex-compact` | `Compact` | Store maintenance (section 9). Takes no `-WorktreePath` — it is global |
-| `gortex-sync-skills` | — | Runs `Sync-AgentSkills.ps1 -Prune` |
+| `gortex-status` | `Manage-GortexWorktree.ps1 -Action Status` | Reports `Untracked` / `PendingOrIndexing` / `Stale` / `Ready`, plus branch, HEAD, indexed commit, and expected exclusions |
+| `gortex-wait` | `Manage-GortexWorktree.ps1 -Action Wait` | Blocks until `indexed=true`, with the same 10-second heartbeat as setup |
+| `gortex-compact` | `Manage-GortexWorktree.ps1 -Action Compact` | Store maintenance (section 9). Takes no `-WorktreePath` — it is global |
+| `gortex-repair-policy` | `Manage-GortexWorktree.ps1 -Action Setup` | Re-asserts durable global policy on an already-tracked worktree |
+| `gortex-sync-skills` | `Sync-AgentSkills.ps1 -Prune` | Re-mirrors the skill set |
+| `gortex-repair` | `Repair-GortexAgentKit.ps1` | Repairs the whole integration: daemon, tracking, index, hooks, MCP, instructions, skills |
+| `gortex-check` | `Repair-GortexAgentKit.ps1 -CheckOnly` | The same diagnosis with no changes; exits non-zero when anything is wrong |
 
-`gortex-repair` is the same command as `worktree.setup`, which is the point: `Setup` is idempotent, so when a worktree ends up tracked but with an incomplete global entry — a missing workspace, project, or exclusion — you re-run it to repair the policy in place. Untracking and re-adding would instead trigger a full reindex, which on a large repo costs 15–20 minutes.
+**There are two different repairs, and picking the wrong one wastes time.**
 
-To use this layout, copy `transitional\Manage-GortexWorktree.ps1` and `Sync-AgentSkills.ps1` into `local\Paseo\` in the main checkout. Keeping them under a gitignored `local\` means the kit never appears in `git status` or a diff, at the cost of being invisible to `git grep` and absent from fresh clones.
+`gortex-repair-policy` is the same command as `worktree.setup`, which is the point: `Setup` is idempotent, so when a worktree ends up tracked but with an incomplete global entry — a missing workspace, project, or exclusion — you re-run it to repair the policy in place. Untracking and re-adding would instead trigger a full reindex, which on a large repo costs 15–20 minutes. Its scope is **one worktree's entry in the global config**.
 
-The `metadataGeneration` block is unrelated to Gortex. It is included because it is part of the real file, and because its `humanizer` reference is a reminder that these instructions can assume skills the kit has already mirrored.
+`gortex-repair` is the machine-wide one (section 12). It assumes nothing about the daemon being up or the repo being tracked, and it is the only one that notices the failures the installer cannot see — a dead daemon, an untracked repo, or a Copilot instructions file left describing a profile you have since switched away from. Reach for `gortex-check` first: it names the problem without changing anything.
+
+To use this layout, copy `transitional\Manage-GortexWorktree.ps1`, `Sync-AgentSkills.ps1`, `Install-GortexAgentKit.ps1`, and `Repair-GortexAgentKit.ps1` into `local\Paseo\` in the main checkout. `Repair-GortexAgentKit.ps1` shells out to the installer, so both must travel together or the repair reports `installer not found` and stops. Keeping them under a gitignored `local\` means the kit never appears in `git status` or a diff, at the cost of being invisible to `git grep` and absent from fresh clones.
+
+The `metadataGeneration` block is unrelated to Gortex. It is included because it is part of the real file, and because its `humanizer` reference is a reminder that these instructions can assume skills the kit has already mirrored — the mirror in section 8 is what puts `humanizer` within reach of Copilot CLI and Codex, not just Claude Code.
 
 ---
 
@@ -489,19 +543,37 @@ Compare-Object (Get-Content "$env:TEMP\skills-before.txt") (Get-Content "$env:TE
 gortex hook --help
 gortex install --print-config codex
 
-# 6. Re-verify (section 6), then restart every agent
+# 6. Confirm the whole integration survived the upgrade
+pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath . -CheckOnly
+
+# 7. Re-verify (section 6), then restart every agent
 ```
 
 What to watch for:
 
 - **New hook events.** If `gortex install --print-config` shows an event the kit does not wire, decide whether the gate belongs there. The gate belongs on prompt submission, not on tool calls.
 - **New skills.** They land in `~\.claude\skills` and the junction mirror picks them up on the next `Sync-AgentSkills.ps1 -Prune`.
+- **A restarted daemon.** `gortex upgrade` bounces it, and an upgrade that changes the store format can leave the index rebuilding. Step 6 catches both; without it the first symptom is an agent that silently answers nothing.
+- **A rewritten instruction profile.** An upgrade can ship new profile text, which makes the inlined Copilot copy stale exactly as a manual `instructions switch` does (section 12). Step 3 already fixes it, and step 6 confirms it.
 - **Native worktree support.** When it ships, drop the transitional tier entirely.
 - **Store growth.** A major index-format change can rebuild everything; check `StoreHealth` afterwards.
 
 ---
 
 ## 12. Troubleshooting
+
+**Start here.** `Repair-GortexAgentKit.ps1` diagnoses and fixes most of what follows, in dependency order — binary, daemon, store, tracking, index, then kit wiring — and stops at the first thing it cannot recover so one real failure does not produce a screenful of misleading ones:
+
+```powershell
+pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath . -CheckOnly   # diagnose only
+pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath .              # diagnose and fix
+```
+
+It exits 0 when healthy or fully repaired and 1 when anything is unresolved, so `-CheckOnly` works as a health probe in a script or a scheduled task. It never compacts the store: compaction takes an exclusive lock for minutes, so it is reported and left to you (section 9).
+
+The repair delegates all wiring changes to `Install-GortexAgentKit.ps1` rather than reimplementing them. That is deliberate — two copies of "what wired means" would drift apart, and the installer is already idempotent. Add `-Force` to re-assert every managed file even when it already matches.
+
+The entries below are what to do when the repair reports something it cannot fix itself.
 
 **Agent ignores the graph and greps instead.**
 Skills or hooks were not loaded. Restart the agent — both load at session start. Then check `(Get-ChildItem "$HOME\.agents\skills" -Directory -Filter 'gortex-*').Count`.
@@ -542,6 +614,19 @@ Compact the store (section 9).
 **Hook edits appear to do nothing.**
 Confirm you edited `~\.gortex\agent-hooks\*`, not the kit folder. The installer copies files; the kit is the source, the deployed copy is what runs. Re-run the installer after editing the kit.
 
+**Copilot still follows the old rules after `gortex instructions switch`.**
+Expected, and nothing warns you about it. Gortex rewrites its own targets on a switch — `~\.claude\CLAUDE.md` and `~\.codex\AGENTS.md` both `@`-import `~\.gortex\instructions\active.md`, so they track the change for free. Copilot has no import resolution, so the kit **inlines** the profile body into `~\.copilot\copilot-instructions.md`, and an inlined copy does not follow anything. Re-run the installer, or:
+
+```powershell
+pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath .
+# expect: kit wiring  Repaired  installer re-applied the managed configuration
+```
+
+`-CheckOnly` reports this as `Copilot instructions are stale (active profile changed)`. It compares the file against the current profile body, so it is the only detector for a failure where everything still appears to work and the model is simply told the wrong thing. Restart the agent afterwards — instructions load at session start.
+
+**`copilot-instructions.md` is full of `â€"` and the repair keeps reporting it stale.**
+An older build wrote it with `Set-Content`. Under Windows PowerShell 5.1 `Get-Content` decodes a BOM-less file as ANSI, so the em dashes in the Gortex profile were read as mojibake and written straight back out, and the comparison against the real profile then never matched. Both scripts now read and write UTF-8 without a BOM through .NET, which is also what makes them byte-identical under 5.1 and pwsh 7. Delete the file and re-run the installer to regenerate it.
+
 ---
 
 ## 13. File map
@@ -552,6 +637,7 @@ C:\huginn\
 ├─ README.md                         short overview; points here
 ├─ .gitignore
 ├─ Install-GortexAgentKit.ps1        detects agents, wires hooks, mirrors skills
+├─ Repair-GortexAgentKit.ps1        diagnoses + fixes daemon, tracking, index, wiring
 ├─ Analyze-RepoExclusions.ps1        derives per-repo exclusions
 ├─ Sync-AgentSkills.ps1              mirrors Gortex skills to Copilot CLI + Codex
 ├─ hooks\
@@ -569,6 +655,26 @@ C:\huginn\
 
 Deployed to `~\.gortex\agent-hooks\` at install time. Per-agent wiring lives in `~\.claude\settings.json`, `~\.copilot\hooks\gortex.json`, `~\.codex\config.toml`, and `~\.config\opencode\plugin\`.
 
+MCP and instructions are separate from the hook wiring:
+
+| File | Contents | Read by |
+|---|---|---|
+| `~\.copilot\mcp-config.json` | `mcpServers.gortex` | Copilot CLI **and** the VS Code agent host |
+| `%APPDATA%\Code\User\mcp.json` | `servers.gortex` | the native Copilot Chat panel |
+| `~\.copilot\copilot-instructions.md` | delimited `gortex:rules` block | all three Copilot surfaces |
+
+Only the `gortex` entry and the delimited block are kit-owned; every other server, the VS Code `inputs` array, and any instructions you write around the block are preserved untouched.
+
+**One instructions file genuinely covers all three surfaces**, which is worth stating precisely because it looks too convenient to be true:
+
+- The **CLI** resolves `<configDir>\copilot-instructions.md`, where `configDir` is `$env:COPILOT_HOME` or `~\.copilot`. It surfaces as `Home copilot-instructions.md`.
+- The **VS Code agent host** execs that same binary with an unmodified environment, so it inherits the same path.
+- The **native Chat panel** is a separate runtime that never runs the CLI, but it searches the same location independently: its prompt loader calls `findFilesInRoots([userHome], ".copilot", [{ fileName: "copilot-instructions.md" }])` alongside the workspace `.github` lookup. Verified in VS Code 1.133.
+
+The panel honours the file only while `github.copilot.chat.codeGeneration.useInstructionFiles` is `true`. That is the default and the kit does not touch it — `settings.json` is a file users edit by hand, and owning it to force a default would cause more problems than it solves. If the panel ignores the rules, check that setting first.
+
+Gortex writes the Claude and Codex equivalents itself (`~\.claude\CLAUDE.md`, `~\.codex\AGENTS.md`) and both `@`-import `~\.gortex\instructions\active.md`. Copilot has no import syntax, so the kit inlines the body instead. That is the whole reason a switch of instruction profile needs a re-run — see section 12.
+
 ---
 
 ## 14. Platform notes
@@ -576,7 +682,9 @@ Deployed to `~\.gortex\agent-hooks\` at install time. Per-agent wiring lives in 
 - **Windows only.** Every script is PowerShell. The gate would port to bash, but the adapters would need rewriting.
 - **Claude Code runs hooks through POSIX `sh` on Windows**, not `cmd`. That is why its hook command is shell script invoking `claude-hook.cmd`, which `sh` can exec directly.
 - **Gortex's agent name is `claude-code`**; its hook wire-protocol flag is `--agent=claude`. Two different namespaces.
-- **Copilot CLI has no Gortex adapter**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned.
-- **Copilot in VS Code shells out to the CLI.** Its bootstrapper lives at `%APPDATA%\Code\User\globalStorage\github.copilot-chat\copilotCli\copilot.ps1`; it resolves the real `copilot` binary on PATH, version-checks it, and execs it with an unmodified environment. There is no second configuration tree to wire, and no VS Code entry in the installer's detection table by design.
-- **Gortex's `vscode` adapter is unrelated to any of this.** `gortex install --agents vscode` writes a repo-local `.vscode\mcp.json` for the native Copilot Chat panel. It installs no hooks and no skills, and has no effect on the agent host.
+- **Copilot CLI has no Gortex adapter**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned, and its MCP server and rule block are kit-written too. `gortex install` has no `copilot` target — passing one is an error.
+- **Copilot in VS Code shells out to the CLI.** Its bootstrapper lives at `%APPDATA%\Code\User\globalStorage\github.copilot-chat\copilotCli\copilot.ps1`; it resolves the real `copilot` binary on PATH, version-checks it, and execs it with an unmodified environment. Hooks, skills, and instructions therefore need no second wiring — **only MCP does**, because the Chat panel reads `%APPDATA%\Code\User\mcp.json` instead.
+- **Gortex's `vscode` adapter writes the wrong scope for this purpose.** `gortex install --agents vscode` writes a **repo-local** `.vscode\mcp.json`, which covers only the folder that was open when it ran. The kit writes the user profile so every workspace is covered. It still installs no hooks and no skills, and has no effect on the agent host.
+- **`deferTools` is not a Copilot CLI setting.** It appears in neither the JS bundle nor the native binary, so it is accepted into the JSON and silently ignored. The kit does not write it, and preserves it if you already have it.
+- **The Copilot CLI does not resolve `@`-file imports in instructions.** A Claude-style `@C:\...\active.md` pointer is passed through as literal text, which is why the kit inlines the profile body instead.
 - `$HOME` is fixed at PowerShell session start and **cannot** be redirected by setting `$env:USERPROFILE` in a child process. Do not attempt to sandbox-test the installer that way; it will write to the real config tree.
