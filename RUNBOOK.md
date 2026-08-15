@@ -377,6 +377,77 @@ Use `--absolute-git-dir`, which is per-worktree. `--git-common-dir` is shared by
 
 These commands receive `PASEO_WORKTREE_PATH`, `PASEO_BRANCH_NAME`, `PASEO_SOURCE_CHECKOUT_PATH`, `PASEO_WORKSPACE_ID`, and `PASEO_AGENT_CWD`.
 
+### Complete example — repo-vendored scripts
+
+The blocks above point at the fixed `C:\huginn` install. The alternative is to keep the scripts **inside the repo** under `local\Paseo\`, which is the configuration in production use on a large .NET repo:
+
+```json
+{
+  "worktree": {
+    "setup": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Setup -WorktreePath . -SourceCheckoutPath (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim()))\"",
+    "teardown": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"$env:PASEO_SOURCE_CHECKOUT_PATH\\local\\Paseo\\Manage-GortexWorktree.ps1\" -Action Teardown"
+  },
+  "scripts": {
+    "gortex-status": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Status -WorktreePath .\""
+    },
+    "gortex-repair": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Setup -WorktreePath . -SourceCheckoutPath (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim()))\""
+    },
+    "gortex-wait": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Wait -WorktreePath .\""
+    },
+    "gortex-compact": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Manage-GortexWorktree.ps1') -Action Compact\""
+    },
+    "gortex-sync-skills": {
+      "command": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())) 'local/Paseo/Sync-AgentSkills.ps1') -Prune\""
+    }
+  },
+  "metadataGeneration": {
+    "branchName": {
+      "instructions": "Use feature/<ticket-key>[-<ticket-key>...]-<description> for features, stories, or tasks; bugfix/... for normal bugs; hotfix/[<version>/]... for urgent production fixes; and release/<version> for releases. Include every supplied ticket key. Never invent keys or versions. Lowercase kebab-case only."
+    },
+    "commitMessage": {
+      "instructions": "Use the installed humanizer skill. Format: <ticket-key>[, <ticket-key>...] - <imperative summary>. Include every ticket key visible in the context; never invent one. No conventional prefix or trailing period."
+    },
+    "pullRequest": {
+      "instructions": "Use the installed humanizer skill. Title: <ticket-key>[, <ticket-key>...] - <summary>. Include every ticket key visible in the context; never invent one. Body: what changed, why, actual validation, and material risks or configuration. Omit filler and empty sections."
+    }
+  }
+}
+```
+
+**Why the path is computed instead of hardcoded.** `local\` is gitignored, and **git does not populate ignored files into a new worktree**. The scripts therefore exist only in the main checkout, never in the worktree Paseo just created. Every command resolves back to that main checkout:
+
+```powershell
+Split-Path -Parent ((& git rev-parse --path-format=absolute --git-common-dir | Out-String).Trim())
+```
+
+`--git-common-dir` returns the shared `.git` directory even when invoked from inside a linked worktree, so its parent is always the main checkout root. Three details matter:
+
+- `--path-format=absolute` is load-bearing, and it fails in a place you would not expect. From a **linked worktree** git returns an absolute path either way, so the flag looks redundant. From the **main checkout** it returns the literal string `.git`, and `Split-Path -Parent '.git'` is the empty string, so `Join-Path` collapses and the command dies. The `scripts` entries are routinely run from the main checkout, so dropping the flag breaks them there while every worktree keeps working — a failure that is easy to misread as worktree-specific.
+- `Out-String` then `.Trim()` strips git's trailing newline, which would otherwise be baked into the path.
+- `-Command` is required rather than `-File`, because the script path is computed at runtime. `-File` takes a literal path only.
+
+**Teardown deliberately uses a different form.** It runs `-File` against `$env:PASEO_SOURCE_CHECKOUT_PATH` because by teardown the worktree may already be gone, so `git rev-parse` in the current directory cannot be trusted. Paseo supplies the source checkout directly, so no computation is needed.
+
+The five scripts:
+
+| Script | Action | Purpose |
+|---|---|---|
+| `gortex-status` | `Status` | Reports `Untracked` / `PendingOrIndexing` / `Stale` / `Ready`, plus branch, HEAD, indexed commit, and expected exclusions |
+| `gortex-repair` | `Setup` | Re-asserts durable global policy on an already-tracked worktree |
+| `gortex-wait` | `Wait` | Blocks until `indexed=true`, with the same 10-second heartbeat as setup |
+| `gortex-compact` | `Compact` | Store maintenance (section 9). Takes no `-WorktreePath` — it is global |
+| `gortex-sync-skills` | — | Runs `Sync-AgentSkills.ps1 -Prune` |
+
+`gortex-repair` is the same command as `worktree.setup`, which is the point: `Setup` is idempotent, so when a worktree ends up tracked but with an incomplete global entry — a missing workspace, project, or exclusion — you re-run it to repair the policy in place. Untracking and re-adding would instead trigger a full reindex, which on a large repo costs 15–20 minutes.
+
+To use this layout, copy `transitional\Manage-GortexWorktree.ps1` and `Sync-AgentSkills.ps1` into `local\Paseo\` in the main checkout. Keeping them under a gitignored `local\` means the kit never appears in `git status` or a diff, at the cost of being invisible to `git grep` and absent from fresh clones.
+
+The `metadataGeneration` block is unrelated to Gortex. It is included because it is part of the real file, and because its `humanizer` reference is a reminder that these instructions can assume skills the kit has already mirrored.
+
 ---
 
 ## 11. Upgrading Gortex
