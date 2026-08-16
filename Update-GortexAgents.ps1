@@ -107,11 +107,27 @@ function Backup-File {
     return $backup
 }
 
+# A shell started before Gortex was installed carries a PATH snapshot that
+# predates it, so Get-Command alone fails on a perfectly healthy machine.
+# Re-read the persisted PATH, then fall back to the default install location.
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ';'
+
 $gortexExe = (Get-Command gortex -ErrorAction SilentlyContinue)
-if ($null -eq $gortexExe) {
-    throw "gortex not found on PATH. Install it first: irm https://get.gortex.dev/install.ps1 | iex"
+if ($null -ne $gortexExe) {
+    $gortexExe = $gortexExe.Source
 }
-$gortexExe = $gortexExe.Source
+else {
+    $fallback = Join-Path $ConfigRoot 'AppData\Local\Programs\gortex\gortex.exe'
+    if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+        $gortexExe = $fallback
+        Write-Warning "gortex found at $fallback but not on PATH; open a new shell to pick it up."
+    }
+    else {
+        throw "gortex not found on PATH. Install it first: irm https://get.gortex.dev/install.ps1 | iex"
+    }
+}
 
 Write-Host "[update] gortex: $gortexExe"
 Write-Host ('[update] version: ' + ((& $gortexExe version 2>&1 | Select-Object -First 1) -join ''))

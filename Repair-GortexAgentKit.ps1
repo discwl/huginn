@@ -215,6 +215,7 @@ if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
 $RepoPath = (Resolve-Path -LiteralPath $RepoPath).Path
 
 $installer = Join-Path $KitRoot 'Install-GortexAgentKit.ps1'
+$updater = Join-Path $KitRoot 'Update-GortexAgents.ps1'
 $worktreeTool = Join-Path $KitRoot 'transitional\Manage-GortexWorktree.ps1'
 
 Write-Step "Kit root:   $KitRoot"
@@ -377,30 +378,56 @@ else {
 
 # --- 6-7. kit wiring ---------------------------------------------------------
 
-# Drift detection only. The installer owns the definition of "wired"; this list
-# exists so the report can name what was wrong and so a healthy machine is not
-# put through an installer run it does not need.
+# Drift detection only. Repair is delegated: the installer owns hooks, MCP and
+# the Copilot instructions file, and Update-GortexAgents.ps1 owns refreshing an
+# instruction block wherever it already lives. Each finding therefore carries the
+# script that can actually fix it, so the repair runs the right one instead of
+# re-running the installer against drift it has no way to resolve.
 function Get-WiringDrift {
-    $drift = [System.Collections.Generic.List[string]]::new()
+    $drift = [System.Collections.Generic.List[object]]::new()
+
+    $startMark = '<!-- gortex:rules:start -->'
+    $endMark = '<!-- gortex:rules:end -->'
+
+    function Add-Drift {
+        param([string] $Message, [string] $Fixer = 'installer')
+        $drift.Add([pscustomobject]@{ Message = $Message; Fixer = $Fixer })
+    }
 
     $hookTarget = Join-Path $ConfigRoot '.gortex\agent-hooks'
     foreach ($file in @('gortex-readiness.ps1', 'copilot-hook.ps1', 'codex-hook.ps1', 'claude-hook.ps1', 'claude-hook.cmd')) {
         $deployed = Join-Path $hookTarget $file
         $source = Join-Path $KitRoot "hooks\$file"
         if (-not (Test-Path -LiteralPath $deployed -PathType Leaf)) {
-            $drift.Add("hook missing: $file")
+            Add-Drift "hook missing: $file"
         }
         elseif (Test-Path -LiteralPath $source -PathType Leaf) {
             $a = Read-TextFile $deployed
             $b = Read-TextFile $source
             if ($null -ne $a -and $null -ne $b -and $a.TrimEnd() -ne $b.TrimEnd()) {
-                $drift.Add("hook stale: $file")
+                Add-Drift "hook stale: $file"
             }
         }
     }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $ConfigRoot '.copilot\hooks\gortex.json') -PathType Leaf)) {
-        $drift.Add('Copilot CLI hooks not registered')
+    $copilotHooks = Join-Path $ConfigRoot '.copilot\hooks\gortex.json'
+    if (-not (Test-Path -LiteralPath $copilotHooks -PathType Leaf)) {
+        Add-Drift 'Copilot CLI hooks not registered'
+    }
+    else {
+        # Presence is not enough. Copilot skips an event whose value is a bare
+        # object instead of an array, silently and without logging anything, so
+        # a file that looks correct can be wired to nothing at all.
+        $parsed = try { Read-TextFile $copilotHooks | ConvertFrom-Json } catch { $null }
+        if ($null -eq $parsed -or $null -eq $parsed.PSObject.Properties['hooks']) {
+            Add-Drift 'Copilot CLI hooks unreadable'
+        }
+        else {
+            $scalar = @($parsed.hooks.PSObject.Properties | Where-Object { $_.Value -isnot [array] })
+            if ($scalar.Count -gt 0) {
+                Add-Drift "Copilot CLI hooks never run (not arrays): $(($scalar.Name) -join ', ')"
+            }
+        }
     }
 
     foreach ($mcp in @(
@@ -422,56 +449,74 @@ function Get-WiringDrift {
                 }
             }
             catch {
-                $drift.Add("$($mcp.Label) MCP config is not valid JSON")
+                Add-Drift "$($mcp.Label) MCP config is not valid JSON"
                 continue
             }
         }
-        if (-not $registered) { $drift.Add("$($mcp.Label) MCP server not registered") }
+        if (-not $registered) { Add-Drift "$($mcp.Label) MCP server not registered" }
     }
 
-    # The Copilot instructions file inlines the active profile rather than
-    # importing it, so switching profiles silently leaves it describing rules
-    # that are no longer in force. This is the drift case that has no other
-    # detector -- everything still "works", it just tells the model the wrong
-    # thing. Comparing bodies is what turns that into a visible failure.
+    # Instruction blocks are inlined copies of the active profile, so they go
+    # stale on `gortex instructions switch`, on `gortex upgrade`, and on any
+    # change to the block format itself. Nothing else detects this: every file
+    # is present and well-formed, the agent simply gets told the wrong thing.
+    #
+    # The comparison is against the *whole block*, not just the body. An earlier
+    # version checked `.Contains($body)` and passed a file whose block still
+    # carried the old two-line management comment -- the body was present, so it
+    # looked current, while `gortex install` and the kit each saw the other's
+    # output as drift and rewrote it forever, stranding a .bak per alternation.
     $active = Join-Path $ConfigRoot '.gortex\instructions\active.md'
-    # Not just the canonical path: Copilot loads ~\.copilot\copilot-instructions.md
-    # AND ~\.copilot\instructions\*.md in the same session, and the installer
-    # deliberately reuses whichever one already owns the block rather than
-    # creating a second copy. Checking only the canonical name reports
-    # "instructions file missing" on a machine that is in fact correctly wired.
-    $copilotInstructions = Join-Path $ConfigRoot '.copilot\copilot-instructions.md'
-    if (-not (Test-Path -LiteralPath $copilotInstructions -PathType Leaf)) {
-        $owning = @(
-            Get-ChildItem -LiteralPath (Join-Path $ConfigRoot '.copilot\instructions') `
-                -File -Filter '*.md' -ErrorAction SilentlyContinue |
-                Where-Object { (Read-TextFile $_.FullName) -match '<!-- gortex:rules:start -->' } |
-                Sort-Object Name
-        )
-        if ($owning.Count -gt 0) { $copilotInstructions = $owning[0].FullName }
-    }
     if (Test-Path -LiteralPath $active -PathType Leaf) {
-        if (-not (Test-Path -LiteralPath $copilotInstructions -PathType Leaf)) {
-            $drift.Add('Copilot instructions file missing')
+        $body = (Read-TextFile $active).Trim()
+
+        # Byte-identical to what `gortex install`, Install-GortexAgentKit.ps1 and
+        # Update-GortexAgents.ps1 all emit: start marker, LF, body, blank line,
+        # end marker. Three writers agree on this exact form; a detector that
+        # accepted anything looser would not notice when one of them drifted.
+        $expected = $startMark + "`n" + $body + "`n`n" + $endMark
+
+        # Copilot genuinely loads copilot-instructions.md *and* instructions\*.md
+        # in the same session, and Gortex owns the Codex and OpenCode copies, so
+        # every marker-carrying file is checked rather than just the canonical
+        # Copilot one. A stale block in any of them reaches a model.
+        $instructionFiles = [System.Collections.Generic.List[string]]::new()
+        $instructionFiles.Add((Join-Path $ConfigRoot '.copilot\copilot-instructions.md'))
+        $instructionFiles.Add((Join-Path $ConfigRoot '.codex\AGENTS.md'))
+        $instructionFiles.Add((Join-Path $ConfigRoot '.config\opencode\AGENTS.md'))
+        foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ConfigRoot '.copilot\instructions') `
+                    -File -Filter '*.md' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $instructionFiles.Add($f.FullName)
         }
-        else {
-            $body = (Read-TextFile $active).Trim()
-            $current = Read-TextFile $copilotInstructions
-            if ($null -eq $current -or -not $current.Contains('<!-- gortex:rules:start -->')) {
-                $drift.Add('Copilot instructions missing the gortex rules block')
+
+        $copilotOwned = 0
+        foreach ($path in $instructionFiles) {
+            $current = Read-TextFile $path
+            if ($null -eq $current) { continue }
+
+            # Line endings are not drift. Comparing raw text would flag a file
+            # some other tool rewrote with CRLF even though its rules are right.
+            $normalised = $current -replace "`r`n", "`n"
+            if (-not $normalised.Contains($startMark)) { continue }
+
+            if ($path -like "*\.copilot\*") { $copilotOwned++ }
+
+            if (-not $normalised.Contains($expected)) {
+                Add-Drift "instructions stale: $(Split-Path -Leaf $path)" 'update'
             }
-            # Deliberately .Contains and not -like. The instruction body is
-            # Markdown, so it is full of * and [ ] that -like would read as
-            # wildcard metacharacters -- which reported permanent drift on a
-            # file that was in fact byte-for-byte correct.
-            elseif (-not $current.Contains($body)) {
-                $drift.Add('Copilot instructions are stale (active profile changed)')
-            }
+        }
+
+        # Only the Copilot file is the kit's to create -- Gortex writes the Codex
+        # and OpenCode ones itself, and Update-GortexAgents.ps1 deliberately
+        # refuses to create any file, so a missing Copilot block is the
+        # installer's job and nobody else's.
+        if ($copilotOwned -eq 0) {
+            Add-Drift 'Copilot instructions file missing or has no gortex rules block'
         }
     }
 
     $mirrored = @(Get-ChildItem (Join-Path $ConfigRoot '.agents\skills') -Directory -Filter 'gortex-*' -ErrorAction SilentlyContinue).Count
-    if ($mirrored -eq 0) { $drift.Add('no gortex skills mirrored to ~/.agents/skills') }
+    if ($mirrored -eq 0) { Add-Drift 'no gortex skills mirrored to ~/.agents/skills' }
 
     # Call sites wrap this in @() so an empty or single finding both arrive as an
     # array. Returning `, $drift` as well would nest it one level deeper and the
@@ -481,22 +526,34 @@ function Get-WiringDrift {
 
 $drift = @(Get-WiringDrift)
 
+function Format-Drift {
+    param([object[]] $Items)
+    return (($Items | ForEach-Object { $_.Message }) -join '; ')
+}
+
 if ($drift.Count -eq 0 -and -not $Force) {
     Add-Finding 'kit wiring' 'Ok' 'hooks, MCP, instructions and skills all current'
 }
 elseif ($CheckOnly) {
-    Add-Finding 'kit wiring' 'Failed' ($drift -join '; ')
+    Add-Finding 'kit wiring' 'Failed' (Format-Drift $drift)
 }
 elseif ($PSCmdlet.ShouldProcess($installer, 'Re-run to repair kit wiring')) {
     if ($drift.Count -gt 0) {
-        Write-Step "Wiring drift detected: $($drift.Count) item(s). Re-running the installer."
-        foreach ($item in $drift) { Write-Detail "- $item" }
+        Write-Step "Wiring drift detected: $($drift.Count) item(s)."
+        foreach ($item in $drift) { Write-Detail "- $($item.Message)" }
     }
     else {
         Write-Step 'Re-asserting all managed files (-Force).'
     }
 
     try {
+        # The installer creates and wires; it only ever writes the Copilot
+        # instructions file. A stale block in ~/.codex/AGENTS.md or the OpenCode
+        # copy is outside its reach, so running it alone would report the same
+        # drift forever. Both are run when both apply.
+        $needsInstaller = $Force -or @($drift | Where-Object { $_.Fixer -eq 'installer' }).Count -gt 0
+        $needsUpdate = @($drift | Where-Object { $_.Fixer -eq 'update' }).Count -gt 0
+
         $arguments = @{
             KitRoot    = $KitRoot
             Agents     = $Agents
@@ -504,14 +561,29 @@ elseif ($PSCmdlet.ShouldProcess($installer, 'Re-run to repair kit wiring')) {
         }
         if ($Force) { $arguments['Force'] = $true }
 
-        & $installer @arguments | Out-Null
+        if ($needsInstaller) {
+            Write-Step 'Running Install-GortexAgentKit.ps1.'
+            & $installer @arguments | Out-Null
+        }
+
+        if ($needsUpdate) {
+            if (Test-Path -LiteralPath $updater -PathType Leaf) {
+                Write-Step 'Running Update-GortexAgents.ps1 to refresh instruction blocks.'
+                # -SkipSkills because the installer's mirror already covers them,
+                # and running both would re-seed the same junctions twice.
+                & $updater -ConfigRoot $ConfigRoot -KitRoot $KitRoot -SkipSkills | Out-Null
+            }
+            else {
+                Write-Detail "Update-GortexAgents.ps1 not found at $updater"
+            }
+        }
 
         $after = @(Get-WiringDrift)
         if ($after.Count -eq 0) {
-            Add-Finding 'kit wiring' 'Repaired' 'installer re-applied the managed configuration'
+            Add-Finding 'kit wiring' 'Repaired' 'managed configuration re-applied'
         }
         else {
-            Add-Finding 'kit wiring' 'Failed' ("still drifted: " + ($after -join '; '))
+            Add-Finding 'kit wiring' 'Failed' ("still drifted: " + (Format-Drift $after))
         }
     }
     catch {

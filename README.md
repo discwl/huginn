@@ -33,6 +33,7 @@ Full instructions, per-repo configuration, verification, and troubleshooting are
 |---|---|
 | `Install-GortexAgentKit.ps1` | Detects agents, wires the gate, registers MCP for both Copilot surfaces, writes Copilot's rule block, mirrors skills. Idempotent, supports `-WhatIf` |
 | `Repair-GortexAgentKit.ps1` | Diagnoses and repairs the whole integration — daemon, tracking, index, hooks, MCP, instructions, skills. `-CheckOnly` makes it a health probe |
+| `Update-GortexAgents.ps1` | Propagates the installed binary's instructions and skills to Codex, Copilot and OpenCode after a `gortex upgrade` or `instructions switch`. Rewrites only the span between the rule markers |
 | `Analyze-RepoExclusions.ps1` | Derives per-repo exclusions from tracked content |
 | `Sync-AgentSkills.ps1` | Mirrors Gortex skills to Copilot CLI and Codex |
 | `hooks/gortex-readiness.ps1` | The readiness gate — single source of truth |

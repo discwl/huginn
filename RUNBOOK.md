@@ -230,6 +230,12 @@ foreach ($h in 'claude-hook.ps1','codex-hook.ps1','copilot-hook.ps1') {
 # 4. Wiring present
 Select-String "$HOME\.codex\config.toml" -Pattern 'codex-hook.ps1'
 (Get-Content "$HOME\.copilot\hooks\gortex.json" -Raw | ConvertFrom-Json).hooks.UserPromptSubmit[0].timeoutSec   # expect 1860
+
+# 4a. Copilot hook events are ARRAYS — a bare object parses fine and never runs
+$h = (Get-Content "$HOME\.copilot\hooks\gortex.json" -Raw | ConvertFrom-Json).hooks
+$h.PSObject.Properties | ForEach-Object { "{0,-16} isArray={1}" -f $_.Name, ($_.Value -is [array]) }
+# expect: isArray=True on every row. Note `.UserPromptSubmit[0]` above passes either way,
+# because indexing a PSCustomObject returns the object itself — so check this too.
 (Get-Content "$HOME\.claude\settings.json" -Raw | ConvertFrom-Json).hooks.UserPromptSubmit |
   ForEach-Object { $_.hooks[0].command } | Select-String 'gortex'
 
@@ -282,6 +288,24 @@ $env:GORTEX_CLAUDE_REQUIRED  = '0'
 $env:GORTEX_COPILOT_REQUIRED = '0'
 $env:GORTEX_CODEX_REQUIRED   = '0'
 ```
+
+### What "required" does and does not mean
+
+`GORTEX_*_REQUIRED` gates **availability, not usage**. It refuses to start a turn when the graph cannot answer — daemon down, unreachable, or still indexing. Once the state is `Ready` the gate allows silently, and nothing after that compels the model to choose a graph tool over `grep`.
+
+Tool preference is carried by two softer channels, and a model may ignore both:
+
+- the rule block in `~\.copilot\copilot-instructions.md` (section 13), and
+- the `PreToolUse` nudge, which is **advisory on Copilot**. Copilot honours `{"decision":"block"}` only on `UserPromptSubmit`; on `PreToolUse` it reads `additionalContext` and ignores `decision`, exit code 2, and `{"continue":false}`. Gortex's own enrichment is best-effort too — it returns nothing when the prompt matches no indexed symbol.
+
+To make the graph the *only* option, remove the built-in file tools so the model never sees them:
+
+```powershell
+copilot --excluded-tools view,grep,glob
+copilot --available-tools gortex     # stricter: only Gortex tools survive
+```
+
+`--available-tools` and `--excluded-tools` filter what the model can see; `--allow-tool` / `--deny-tool` only control approval prompts and cannot re-expose a filtered tool. Neither filter has a persisted `config.json` equivalent, so it must be passed per invocation — wrap it in a shell alias if you want it always on. Verify with `copilot help permissions`.
 
 ---
 
@@ -507,13 +531,15 @@ The seven scripts:
 | `gortex-repair` | `Repair-GortexAgentKit.ps1` | Repairs the whole integration: daemon, tracking, index, hooks, MCP, instructions, skills |
 | `gortex-check` | `Repair-GortexAgentKit.ps1 -CheckOnly` | The same diagnosis with no changes; exits non-zero when anything is wrong |
 
-**There are two different repairs, and picking the wrong one wastes time.**
+**There are three overlapping repairs, and picking the wrong one wastes time.**
 
 `gortex-repair-policy` is the same command as `worktree.setup`, which is the point: `Setup` is idempotent, so when a worktree ends up tracked but with an incomplete global entry — a missing workspace, project, or exclusion — you re-run it to repair the policy in place. Untracking and re-adding would instead trigger a full reindex, which on a large repo costs 15–20 minutes. Its scope is **one worktree's entry in the global config**.
 
-`gortex-repair` is the machine-wide one (section 12). It assumes nothing about the daemon being up or the repo being tracked, and it is the only one that notices the failures the installer cannot see — a dead daemon, an untracked repo, or a Copilot instructions file left describing a profile you have since switched away from. Reach for `gortex-check` first: it names the problem without changing anything.
+`gortex-repair` is the machine-wide one (section 12). It assumes nothing about the daemon being up or the repo being tracked, and it is the only one that notices the failures the installer cannot see — a dead daemon, an untracked repo, or an instructions file left describing a profile you have since switched away from. Reach for `gortex-check` first: it names the problem without changing anything.
 
-To use this layout, copy `transitional\Manage-GortexWorktree.ps1`, `Sync-AgentSkills.ps1`, `Install-GortexAgentKit.ps1`, and `Repair-GortexAgentKit.ps1` into `local\Paseo\` in the main checkout. `Repair-GortexAgentKit.ps1` shells out to the installer, so both must travel together or the repair reports `installer not found` and stops. Keeping them under a gitignored `local\` means the kit never appears in `git status` or a diff, at the cost of being invisible to `git grep` and absent from fresh clones.
+`gortex-update-agents` is the narrow one: it only propagates the binary's instructions and skills to the agents that hold an inlined copy (section 11). Use it directly after a `gortex upgrade` or an `instructions switch`. You rarely need to — `gortex-repair` detects stale blocks and calls this script itself — but it is the right tool when nothing else is suspect and you want to skip a full diagnosis.
+
+To use this layout, copy `transitional\Manage-GortexWorktree.ps1`, `Sync-AgentSkills.ps1`, `Install-GortexAgentKit.ps1`, `Update-GortexAgents.ps1`, and `Repair-GortexAgentKit.ps1` into `local\Paseo\` in the main checkout. `Repair-GortexAgentKit.ps1` shells out to both of the others, so they must travel together or the repair reports `installer not found` and stops. Keeping them under a gitignored `local\` means the kit never appears in `git status` or a diff, at the cost of being invisible to `git grep` and absent from fresh clones.
 
 The `metadataGeneration` block is unrelated to Gortex. It is included because it is part of the real file, and because its `humanizer` reference is a reminder that these instructions can assume skills the kit has already mirrored — the mirror in section 8 is what puts `humanizer` within reach of Copilot CLI and Codex, not just Claude Code.
 
@@ -610,7 +636,7 @@ pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath .              # diagno
 
 It exits 0 when healthy or fully repaired and 1 when anything is unresolved, so `-CheckOnly` works as a health probe in a script or a scheduled task. It never compacts the store: compaction takes an exclusive lock for minutes, so it is reported and left to you (section 9).
 
-The repair delegates all wiring changes to `Install-GortexAgentKit.ps1` rather than reimplementing them. That is deliberate — two copies of "what wired means" would drift apart, and the installer is already idempotent. Add `-Force` to re-assert every managed file even when it already matches.
+The repair delegates all wiring changes rather than reimplementing them, routing each finding to the script that owns it: `Install-GortexAgentKit.ps1` for anything it creates or wires, and `Update-GortexAgents.ps1` for a stale rule block. That split is not cosmetic — the installer writes only Copilot's instructions file, so a stale block in `~\.codex\AGENTS.md` is beyond its reach and running it alone would report the same drift forever. Two copies of "what wired means" would also drift apart, and both scripts are already idempotent. Add `-Force` to re-assert every managed file even when it already matches.
 
 The entries below are what to do when the repair reports something it cannot fix itself.
 
@@ -666,10 +692,10 @@ or re-run the installer, or:
 
 ```powershell
 pwsh -File C:\huginn\Repair-GortexAgentKit.ps1 -RepoPath .
-# expect: kit wiring  Repaired  installer re-applied the managed configuration
+# expect: kit wiring  Repaired  managed configuration re-applied
 ```
 
-`-CheckOnly` reports this as `Copilot instructions are stale (active profile changed)`. It compares the file against the current profile body, so it is the only detector for a failure where everything still appears to work and the model is simply told the wrong thing. Restart the agent afterwards — instructions load at session start.
+`-CheckOnly` reports this as `instructions stale: <file>`, naming each file whose block no longer matches. It compares every marker-carrying file against the **exact** expected block — not merely whether the profile body appears somewhere in it — so it also catches a block whose body is current but whose surrounding form is obsolete. An earlier build tested only for the body, which let a file carrying the old comment-prefixed block report healthy while `gortex install` still saw it as drift. This is the only detector for a failure where everything appears to work and the model is simply told the wrong thing. Restart the agent afterwards — instructions load at session start.
 
 **Gortex and the kit keep rewriting the same rule block.**
 Three writers own that block — `gortex install`, `Install-GortexAgentKit.ps1`, and `Update-GortexAgents.ps1` — and Gortex writes the Codex and OpenCode files itself. So the block text must be **byte-identical** across all three or each sees the others' output as drift and rewrites it forever, stranding a `.bak` on every run.
@@ -742,6 +768,7 @@ Gortex writes the Claude and Codex equivalents itself, but not in the same form.
 - **Copilot loads two instruction files at once.** `~\.copilot\copilot-instructions.md` **and** `~\.copilot\instructions\*.md` are both read in the same session — verified by planting a sentinel token in one and having a fresh `copilot -p` session echo it back alongside a value only the other file carries. Writing the canonical file blind would therefore hand the model the same rule block twice on any machine that already keeps one under `instructions\`, and the two copies would drift apart at the next profile switch. The installer reuses whichever file already owns the block; `Update-GortexAgents.ps1` refreshes every file that carries it.
 - **Gortex's agent name is `claude-code`**; its hook wire-protocol flag is `--agent=claude`. Two different namespaces.
 - **Copilot CLI has no Gortex adapter**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned, and its MCP server and rule block are kit-written too. `gortex install` has no `copilot` target — passing one is an error.
+- **Copilot only runs a hook whose event value is a JSON array.** `"UserPromptSubmit": [ { ... } ]` runs; `"UserPromptSubmit": { ... }` is parsed without complaint and then never executed — no error, no log line, and `copilot mcp`/`--log-level all` show nothing. The failure looks exactly like an agent that ignores its instructions. PowerShell makes this easy to write by accident: a function that does `return @($one)` unrolls the single-element array back to a scalar, and `ConvertTo-Json` then emits the dead bare-object form. `New-CopilotHook` returns `, @(...)` for precisely this reason. Verify shape, not just presence — see the check in section 6.
 - **Copilot in VS Code shells out to the CLI.** Its bootstrapper lives at `%APPDATA%\Code\User\globalStorage\github.copilot-chat\copilotCli\copilot.ps1`; it resolves the real `copilot` binary on PATH, version-checks it, and execs it with an unmodified environment. Hooks, skills, and instructions therefore need no second wiring — **only MCP does**, because the Chat panel reads `%APPDATA%\Code\User\mcp.json` instead.
 - **Gortex's `vscode` adapter writes the wrong scope for this purpose.** `gortex install --agents vscode` writes a **repo-local** `.vscode\mcp.json`, which covers only the folder that was open when it ran. The kit writes the user profile so every workspace is covered. It still installs no hooks and no skills, and has no effect on the agent host.
 - **`deferTools` is not a Copilot CLI setting.** It appears in neither the JS bundle nor the native binary, so it is accepted into the JSON and silently ignored. The kit does not write it, and preserves it if you already have it.
