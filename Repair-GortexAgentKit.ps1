@@ -558,6 +558,146 @@ function Get-WiringDrift {
     return $drift.ToArray()
 }
 
+# --- Codex hook trust --------------------------------------------------------
+
+# `codex` on PATH is frequently the npm shim (codex.ps1), which cannot be
+# started as a process. Prefer a real executable, then the shim's sibling .cmd,
+# then the npm vendor layout.
+function Resolve-CodexExecutable {
+    foreach ($cmd in @(Get-Command codex -All -ErrorAction SilentlyContinue)) {
+        if ($cmd.CommandType -eq 'Application' -and $cmd.Source -match '\.(exe|cmd|bat)$') {
+            return $cmd.Source
+        }
+    }
+
+    $shim = (Get-Command codex -ErrorAction SilentlyContinue).Source
+    if ($shim) {
+        $sibling = Join-Path (Split-Path $shim -Parent) 'codex.cmd'
+        if (Test-Path -LiteralPath $sibling -PathType Leaf) { return $sibling }
+    }
+
+    $vendor = Join-Path $env:APPDATA 'npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe'
+    if (Test-Path -LiteralPath $vendor -PathType Leaf) { return $vendor }
+    return $null
+}
+
+# Codex records a trusted_hash per hook layer and silently skips every hook in a
+# layer whose configuration changed since approval. The interactive TUI prompts
+# for re-approval; a non-interactive launch -- Paseo, `codex exec`, the IDE
+# extension -- never does, it just drops the hooks. Nothing is logged, so a deny
+# posture that is wired perfectly in config.toml can still enforce nothing.
+#
+# config.toml cannot distinguish the two states: the stale hash and a valid one
+# are both just a hash. Codex is therefore asked directly over the app-server
+# protocol, which reports trustStatus per hook.
+function Get-CodexHookState {
+    param(
+        [Parameter(Mandatory)][string] $Cwd,
+        [int] $TimeoutSec = 60
+    )
+
+    $codex = Resolve-CodexExecutable
+    if (-not $codex) { return $null }
+
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $codex
+    $psi.Arguments = 'app-server --stdio'
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $proc = $null
+    try {
+        $proc = [Diagnostics.Process]::Start($psi)
+        $cwdJson = $Cwd -replace '\\', '\\'
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"gortex-kit","title":"Gortex Kit","version":"1.0.0"}}}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"hooks/list","params":{"cwds":["' + $cwdJson + '"]}}')
+        $proc.StandardInput.Flush()
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSec)
+        while ((Get-Date) -lt $deadline) {
+            $task = $proc.StandardOutput.ReadLineAsync()
+            $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalMilliseconds)
+            if (-not $task.Wait($remaining)) { break }
+
+            $line = $task.Result
+            if ($null -eq $line) { break }
+            if ($line -notmatch '"id"\s*:\s*2') { continue }
+
+            try { $parsed = $line | ConvertFrom-Json } catch { continue }
+            if ($null -ne $parsed.result) { return $parsed.result }
+        }
+        return $null
+    }
+    catch { return $null }
+    finally {
+        if ($proc) {
+            if (-not $proc.HasExited) {
+                try { $proc.StandardInput.Close() } catch { }
+                if (-not $proc.WaitForExit(5000)) { try { $proc.Kill($true) } catch { } }
+            }
+            $proc.Dispose()
+        }
+    }
+}
+
+function Test-CodexHookTrust {
+    param([Parameter(Mandatory)][string] $Cwd)
+
+    $state = Get-CodexHookState -Cwd $Cwd
+    if ($null -eq $state) {
+        Add-Finding 'codex hook trust' 'Warning' 'could not query codex app-server; trust state unknown'
+        return
+    }
+
+    foreach ($entry in @($state.data)) {
+        # Two hook sources are loaded independently, so a stale legacy file does
+        # not disable the config.toml layer -- but it does mean edits made in one
+        # place can be invisibly duplicated by the other.
+        foreach ($warning in @($entry.warnings)) {
+            Add-Finding 'codex hook sources' 'Warning' $warning
+        }
+
+        $gortexHooks = @($entry.hooks | Where-Object { $_.command -and $_.command -match 'gortex' })
+        if ($gortexHooks.Count -eq 0) {
+            Add-Finding 'codex hook trust' 'Failed' 'no Gortex hooks are registered with Codex'
+            continue
+        }
+
+        # 'managed' is trusted-by-policy (MDM/system layer) and needs no approval.
+        $untrusted = @($gortexHooks | Where-Object { $_.trustStatus -notin @('trusted', 'managed') })
+        $disabled = @($gortexHooks | Where-Object { -not $_.enabled })
+
+        if ($untrusted.Count -eq 0 -and $disabled.Count -eq 0) {
+            Add-Finding 'codex hook trust' 'Ok' "$($gortexHooks.Count) Gortex hook(s) trusted and enabled"
+            continue
+        }
+
+        $detail = @()
+        if ($untrusted.Count -gt 0) {
+            $states = ($untrusted | ForEach-Object { "$($_.eventName)=$($_.trustStatus)" }) -join ', '
+            $detail += "$($untrusted.Count) hook(s) not trusted ($states)"
+        }
+        if ($disabled.Count -gt 0) {
+            $detail += "$($disabled.Count) hook(s) disabled"
+        }
+
+        # Deliberately Failed, not Warning: in this state Codex runs with no
+        # Gortex enforcement at all while every config file still looks correct.
+        Add-Finding 'codex hook trust' 'Failed' (
+            ($detail -join '; ') +
+            '. Gortex is NOT enforcing in Codex. Run `codex` interactively once and approve the hooks.'
+        )
+    }
+}
+
+if (($Agents -contains 'auto' -or $Agents -contains 'codex') -and
+    (Test-Path -LiteralPath (Join-Path $ConfigRoot '.codex\config.toml') -PathType Leaf)) {
+    Test-CodexHookTrust -Cwd $RepoPath
+}
+
 $drift = @(Get-WiringDrift)
 
 function Format-Drift {

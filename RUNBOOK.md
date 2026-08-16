@@ -148,7 +148,13 @@ Useful switches:
 
 **Then restart every agent.** Hooks and skills are read at session start.
 
-**Codex asks to re-approve its hook once.** It stores a `trusted_hash` per hook, and the command changed. This is expected.
+**Codex must re-approve its hooks, and it will not always ask.** Codex stores a `trusted_hash` per hook layer and silently skips *every* hook in a layer whose configuration changed since approval. Only the interactive TUI prompts; a non-interactive launch — Paseo, `codex exec`, the IDE extension — drops the hooks with no prompt, no error, and no log line. `config.toml` still reads exactly right, so the posture looks correct while nothing is enforced.
+
+Launch `codex` interactively once after any hook edit and approve, then verify:
+
+```powershell
+pwsh -File .\Repair-GortexAgentKit.ps1 -CheckOnly   # expects: codex hook trust  Ok
+```
 
 ---
 
@@ -685,8 +691,15 @@ gortex daemon stop
 gortex daemon start --detach
 ```
 
-**Codex says a hook is untrusted.**
-Expected after any hook edit. Approve it once.
+**Codex says a hook is untrusted, or Codex enforces nothing despite correct config.**
+Both are the same fault. Codex hashes each hook layer and skips the whole layer when the hash no longer matches, and only the interactive TUI offers re-approval — Paseo, `codex exec`, and the IDE extension skip silently.
+
+```powershell
+pwsh -File .\Repair-GortexAgentKit.ps1 -CheckOnly   # 'codex hook trust' reports the real state
+codex                                              # approve the hooks, then exit
+```
+
+The check asks Codex directly over the app-server protocol (`hooks/list`), because a stale hash and a valid one are indistinguishable inside `config.toml`. A `trustStatus` of `modified` or `untrusted` means Gortex is not enforcing in Codex at all.
 
 **`0 skill(s) mirrored`, or Copilot and Codex see no `gortex-*` skills.**
 The mirror reads `~\.claude\skills`, which only Gortex's `claude-code` adapter writes. Seed it, then mirror — Claude Code itself is not required:

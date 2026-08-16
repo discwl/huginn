@@ -53,8 +53,12 @@
     Wires only the named agents.
 
 .NOTES
-    Codex stores a trusted_hash per hook. Changing its command is a deliberate
-    edit, so Codex asks to re-approve the hook once on next launch.
+    Codex stores a trusted_hash per hook layer and silently skips every hook in
+    that layer once its configuration changes. Only the interactive TUI offers
+    re-approval -- Paseo, `codex exec` and the IDE extension drop the hooks with
+    no prompt and no error, leaving Codex enforcing nothing while config.toml
+    still looks correct. Launch `codex` interactively once after installing,
+    approve the hooks, then confirm with Repair-GortexAgentKit.ps1 -CheckOnly.
 
     Agents load hooks and skills at session start, so restart them afterwards.
 #>
@@ -713,9 +717,11 @@ if ($selected -contains 'codex') {
     $updated = [regex]::Replace($updated, '(\r?\n){3,}', ([Environment]::NewLine * 2))
 
     if (Set-ManagedContent -Path $codexConfig -Content $updated) {
-        Set-Result 'codex' 'wired' 're-approve the hook on next launch'
+        Set-Result 'codex' 'wired' 'REQUIRED: approve the hooks in an interactive codex session'
         Write-Detail 'UserPromptSubmit now runs the readiness gate'
-        Write-Detail 'Codex will ask to re-approve this hook once (its trusted_hash changed).'
+        Write-Detail 'Codex has untrusted every hook in this layer (its trusted_hash changed).'
+        Write-Detail 'Until you launch `codex` interactively and approve, Codex enforces NOTHING --'
+        Write-Detail 'non-interactive launches (Paseo, codex exec, the IDE) skip hooks silently.'
     }
     else {
         Set-Result 'codex' 'already current' ''
@@ -880,6 +886,7 @@ $script:Results.Values | Format-Table -AutoSize | Out-String -Width 160 | Write-
 
 Write-Host 'Next steps:'
 Write-Host '  1. Restart every agent: hooks and skills are read at session start.'
-Write-Host '  2. Codex asks to re-approve its readiness hook once.'
+Write-Host '  2. Launch `codex` interactively once and approve its hooks.'
+Write-Host '     Required: until approved Codex silently runs with no Gortex enforcement.'
 Write-Host '  3. Verify the gate:'
 Write-Host "       pwsh -File `"$readinessPath`" -Cwd . -Json"
