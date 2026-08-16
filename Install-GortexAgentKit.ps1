@@ -788,8 +788,8 @@ if ($selected -contains 'claude-code') {
             $existing = @($settings.hooks.$eventName)
         }
 
-        # Other tools register their own hooks here, and Orca's is also named
-        # claude-hook.cmd, so the full path is matched rather than the file
+        # Other tools register their own hooks here, and one can share this
+        # hook's file name, so the full path is matched rather than the file
         # name. Matching loosely would silently delete another tool's hook.
         $kept = @($existing | Where-Object {
                 $text = ($_ | ConvertTo-Json -Depth 10 -Compress)

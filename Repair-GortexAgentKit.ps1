@@ -452,8 +452,8 @@ function Get-WiringDrift {
                     $entries = @($claudeCfg.hooks.$evt)
                 }
 
-                # Orca registers a hook of the same file name, so the full
-                # deployed path is matched rather than the leaf.
+                # Another tool can deploy a hook script with the same file name,
+                # so the full deployed path is matched rather than the leaf.
                 $mine = @($entries | Where-Object {
                         ($_ | ConvertTo-Json -Depth 10 -Compress) -like "*$claudeHookPath*"
                     })
