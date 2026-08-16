@@ -17,13 +17,21 @@
          top-level `additionalContext` key. Verified empirically: the nested
          form is silently discarded.
 
+    A PreToolUse denial is the exception to (2) and is forwarded verbatim.
+    Copilot's tool loop acts on `permissionDecision` for preToolUse, and it
+    reads the nested `hookSpecificOutput` because entries registered under the
+    PascalCase event names are tagged `_vsCodeCompat` when the config loads. So
+    Gortex's native reply already blocks the call without translation, and
+    re-encoding it as advisory context would demote a hard block to a
+    suggestion -- which is what left the graph optional under `deny`.
+
     The shim never fails a turn. Any error path exits 0 and emits nothing, so a
     missing binary, a stopped daemon, or malformed JSON degrades to "no extra
     context" instead of breaking the session.
 #>
 [CmdletBinding()]
 param(
-    [string] $Mode = 'enrich',
+    [string] $Mode = 'deny',
     [string] $Agent = 'claude'
 )
 
@@ -46,8 +54,9 @@ function Write-HookBlock {
     param([string] $Reason)
 
     # Copilot aborts the turn on {"decision":"block"}. Verified empirically:
-    # exit code 2 and {"continue":false} are both ignored, and only
-    # UserPromptSubmit honours the block decision.
+    # exit code 2 and {"continue":false} are both ignored. The block decision is
+    # honoured on PreToolUse too, but the readiness gate is the only caller here
+    # because a denied tool call is not the same as an unusable graph.
     $payload = New-Object psobject
     $payload | Add-Member -NotePropertyName decision -NotePropertyValue 'block'
     $payload | Add-Member -NotePropertyName reason -NotePropertyValue $Reason
@@ -143,7 +152,11 @@ try {
         exit 0
     }
 
-    $payload = ConvertTo-GortexPayload -Raw $raw -Event $event
+    # Canonicalise after the tool_result translation so both rewrites land on
+    # one payload. Copilot sends the Claude tool shape, so it reaches the same
+    # tracked-repo comparison, and a shell command it emits is no more
+    # normalised on the way in than Claude's is.
+    $payload = ConvertTo-GortexNormalizedPayload (ConvertTo-GortexPayload -Raw $raw -Event $event)
     $response = ($payload | & $gortex hook "--agent=$Agent" "--mode=$Mode" 2>$null | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($response)) {
         exit 0
@@ -156,19 +169,54 @@ try {
         exit 0
     }
 
-    $context = $null
-    if ($null -ne $parsed.PSObject.Properties['hookSpecificOutput'] -and $null -ne $parsed.hookSpecificOutput) {
+    $nested = $null
+    if ($null -ne $parsed.PSObject.Properties['hookSpecificOutput']) {
         $nested = $parsed.hookSpecificOutput
+    }
+
+    # A denial must reach Copilot in the shape Gortex produced it. Copilot's
+    # tool loop acts on permissionDecision for preToolUse -- `if
+    # (d?.permissionDecision === "deny")` marks the call denied and the tool
+    # never runs -- and it reads the nested hookSpecificOutput because
+    # entries registered under the PascalCase event names are tagged
+    # _vsCodeCompat during config load. Re-encoding the reason as
+    # additionalContext instead, as the enrichment path below does, demotes
+    # a hard block to advice the model is free to ignore, which is exactly
+    # the "graph is optional" failure the deny posture exists to remove.
+    #
+    # Both shapes are read here rather than inside the nested branch: Copilot
+    # honours a top-level permissionDecision too, and a reply carrying only
+    # that would otherwise fall through to the enrichment path and be dropped.
+    $decision = ''
+    if ($null -ne $nested -and $null -ne $nested.PSObject.Properties['permissionDecision']) {
+        $decision = [string] $nested.permissionDecision
+    }
+    elseif ($null -ne $parsed.PSObject.Properties['permissionDecision']) {
+        $decision = [string] $parsed.permissionDecision
+    }
+
+    if ($decision -eq 'deny' -or $decision -eq 'ask') {
+        [Console]::Out.Write($response)
+        exit 0
+    }
+
+    # Copilot honours {"decision":"block"} on PreToolUse as well. Gortex does not
+    # currently emit it, but flattening it into context would silently downgrade
+    # a block, so it is forwarded on the same terms as permissionDecision.
+    if ($null -ne $parsed.PSObject.Properties['decision'] -and
+        [string] $parsed.decision -eq 'block') {
+        [Console]::Out.Write($response)
+        exit 0
+    }
+
+    $context = $null
+    if ($null -ne $nested) {
         if ($null -ne $nested.PSObject.Properties['additionalContext']) {
             $context = [string] $nested.additionalContext
         }
-        # Under the 'deny' posture Gortex returns permissionDecision plus
-        # permissionDecisionReason and NO additionalContext at all, so reading
-        # only additionalContext silently drops the redirect message entirely --
-        # strictly worse than 'enrich', which at least surfaces the advice.
-        # Copilot honours a hard block only on UserPromptSubmit, so a PreToolUse
-        # denial is surfaced as context: the tool still runs, but the model is
-        # told to use the graph instead.
+        # A posture that denies without a decision Copilot understands would
+        # otherwise drop the redirect entirely, which is strictly worse than
+        # 'enrich'. Fall back to the reason so the advice still lands.
         if ([string]::IsNullOrWhiteSpace($context) -and
             $null -ne $nested.PSObject.Properties['permissionDecisionReason']) {
             $context = [string] $nested.permissionDecisionReason

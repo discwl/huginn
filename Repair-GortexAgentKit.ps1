@@ -430,6 +430,40 @@ function Get-WiringDrift {
         }
     }
 
+    $claudeSettings = Join-Path $ConfigRoot '.claude\settings.json'
+    if (Test-Path -LiteralPath $claudeSettings -PathType Leaf) {
+        # PreToolUse is where the deny posture lives. Claude honours a
+        # permissionDecision natively, but only for an event registered in a
+        # file it actually loads. Gortex writes its own Claude hooks to
+        # ~/.claude/settings.local.json, which is not read at user scope, so
+        # every one of them is inert -- a missing entry here leaves the posture
+        # unenforced while `gortex install` still reports it as wired.
+        # UserPromptSubmit alone gates availability, not usage.
+        $claudeCfg = try { Read-TextFile $claudeSettings | ConvertFrom-Json } catch { $null }
+        if ($null -eq $claudeCfg) {
+            Add-Drift 'Claude Code settings unreadable'
+        }
+        else {
+            $claudeHookPath = (Join-Path $hookTarget 'claude-hook.cmd') -replace '\\', '/'
+            foreach ($evt in @('UserPromptSubmit', 'PreToolUse')) {
+                $entries = @()
+                if ($null -ne $claudeCfg.PSObject.Properties['hooks'] -and
+                    $null -ne $claudeCfg.hooks.PSObject.Properties[$evt]) {
+                    $entries = @($claudeCfg.hooks.$evt)
+                }
+
+                # Orca registers a hook of the same file name, so the full
+                # deployed path is matched rather than the leaf.
+                $mine = @($entries | Where-Object {
+                        ($_ | ConvertTo-Json -Depth 10 -Compress) -like "*$claudeHookPath*"
+                    })
+                if ($mine.Count -eq 0) {
+                    Add-Drift "Claude Code $evt hook not registered"
+                }
+            }
+        }
+    }
+
     foreach ($mcp in @(
             @{ Path = Join-Path $ConfigRoot '.copilot\mcp-config.json'; Key = 'mcpServers'; Label = 'Copilot CLI' },
             @{ Path = Join-Path $ConfigRoot 'AppData\Roaming\Code\User\mcp.json'; Key = 'servers'; Label = 'VS Code' }

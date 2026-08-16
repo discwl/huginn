@@ -192,16 +192,72 @@ function Resolve-Executable {
     return $null
 }
 
-# The MCP server stanza. Deliberately minimal, and deliberately the bare command
-# rather than a resolved path: this is the exact shape Gortex's own adapters
-# write for Codex and Claude Code, so all four agents end up pointing at one
-# server definition that survives a Gortex upgrade moving the executable.
+function Resolve-PowerShellHost {
+    <#
+        The interpreter the shims are launched with. PowerShell 7 is required
+        where it exists.
+
+        Windows PowerShell 5.1 was the obvious choice because it ships with the
+        OS, but a shim launched under it never produces a decision. Piping a
+        string to a native command in 5.1 leaves `gortex hook` with nothing on
+        stdin, so it exits 0 and emits no reply, and the shim's catch-all
+        forwards that silence as "the hook had nothing to say". Measured on the
+        same payload: 0 bytes back under 5.1, 1286 bytes (a full deny with its
+        symbol outline) under 7. The failure is invisible because a silent hook
+        is indistinguishable from an allowed call.
+
+        5.1 remains the fallback so a machine without PowerShell 7 still wires
+        up, with the readiness gate and enrichment it can deliver.
+
+        The bare name is returned rather than the resolved path, for the same
+        reason New-GortexMcpEntry uses bare `gortex`: Get-Command resolves a
+        Store-installed pwsh to a version-stamped WindowsApps directory, so
+        writing that path pins every hook to today's build and the next pwsh
+        update silently breaks all of them. 5.1 is emitted as a full path
+        because it has a fixed location and no PATH entry of its own.
+    #>
+
+    if (Resolve-Executable 'pwsh') {
+        return 'pwsh'
+    }
+    return (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+}
+
+# The MCP server stanza. Deliberately minimal, and resolved to a full path when
+# one can be found.
+#
+# The bare command was the original choice, matching what Gortex's own adapters
+# write for Codex and Claude Code, so every agent pointed at one definition that
+# survived an upgrade moving the executable. It does not survive a launcher that
+# does not inherit the user PATH. A Copilot agent started under Paseo came up
+# with no Gortex tools registered at all and correctly refused to fall back to
+# native reads, so the session did no work; Claude in the same workspace was
+# fine, because its entry in ~/.claude.json carries the full path. `gortex
+# doctor` reports the same thing from its own sandbox: "gortex not found on
+# PATH".
+#
+# Gortex installs to a stable per-user location and upgrades replace the binary
+# in place, so the resolved path is not the fragile option here. An
+# unresolvable command is worse than a stale one: it fails silently, and the
+# rule block then tells the agent to stop rather than work around it.
 function New-GortexMcpEntry {
-    return [ordered]@{
+    $entry = [ordered]@{
         type    = 'stdio'
         command = 'gortex'
         args    = @('mcp')
     }
+
+    $resolved = Resolve-Executable 'gortex'
+    if (-not $resolved) {
+        $default = Join-Path $env:LOCALAPPDATA 'Programs\gortex\gortex.exe'
+        if (Test-Path -LiteralPath $default -PathType Leaf) {
+            $resolved = $default
+        }
+    }
+    if ($resolved) {
+        $entry['command'] = $resolved
+    }
+    return $entry
 }
 
 # Registers the Gortex MCP server in a shared JSON config.
@@ -422,16 +478,21 @@ if ($selected -contains 'copilot') {
     Write-Step 'Wiring Copilot CLI.'
 
     # Copilot has no Gortex adapter of its own, so the whole hook file is ours.
-    # Windows PowerShell is used because it is guaranteed present; the hook it
-    # launches is version-agnostic.
-    $winPs = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $winPs = Resolve-PowerShellHost
     $inner = "if (Test-Path -LiteralPath '$copilotHook' -PathType Leaf) { & '$copilotHook' -Mode '$HookMode'; exit `$LASTEXITCODE }; [Console]::In.ReadToEnd() | Out-Null; exit 0"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
     $command = "$(ConvertTo-PosixPath $winPs) -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
 
+    # The leading comma is load-bearing. Copilot's loader passes a non-array
+    # event value straight through -- SYt does `if(!Array.isArray(a)){o[s]=a;
+    # continue}` and the normaliser after it does the same -- and the config
+    # schema then requires an array per event, so the whole file fails
+    # validation and every Gortex hook is dropped. Without the comma PowerShell
+    # unrolls the single-element array back to a scalar and ConvertTo-Json
+    # writes exactly that rejected bare object.
     function New-CopilotHook {
         param([int] $TimeoutSec)
-        return @([ordered]@{
+        return , @([ordered]@{
                 timeoutSec = $TimeoutSec
                 powershell = $command
                 type       = 'command'
@@ -618,7 +679,10 @@ if ($selected -contains 'codex') {
     # old posture while every report claims the new one.
     $toml = [regex]::Replace($toml, '(--agent=codex\s+--mode=)[\w-]+', "`${1}$HookMode")
 
-    $gateCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-PosixPath $codexHook) -Mode $HookMode"
+    # PowerShell 7 where available: a shim launched under 5.1 gets nothing back
+    # from `gortex hook` and silently forwards that as no decision. See
+    # Resolve-PowerShellHost.
+    $gateCommand = "$(ConvertTo-PosixPath (Resolve-PowerShellHost)) -NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-PosixPath $codexHook) -Mode $HookMode"
 
     $block = @(
         '',
@@ -687,33 +751,51 @@ if ($selected -contains 'claude-code') {
     $posixCmd = ConvertTo-PosixPath $claudeCmd
     $command = "if [ -f '$posixCmd' ]; then '$posixCmd' -Mode $HookMode; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi"
 
-    $entry = [pscustomobject]@{
-        matcher = ''
-        hooks   = @([pscustomobject]@{
-                type    = 'command'
-                command = $command
-                timeout = $GateTimeoutSec
+    # UserPromptSubmit carries the readiness gate, so it needs the long timeout.
+    # PreToolUse carries the deny posture: Gortex answers a Grep against indexed
+    # source with permissionDecision=deny, and claude-hook.ps1 forwards that
+    # reply verbatim, so the call is refused rather than merely discouraged.
+    #
+    # Gortex does wire its own Claude hooks, but into
+    # ~/.claude/settings.local.json, and those never fire -- a user-scope
+    # settings.local.json is not loaded. Verified twice: with only Gortex's
+    # PreToolUse present, a Grep on an indexed symbol RAN; with this entry in
+    # settings.json the same Grep was denied. So this is the only Claude
+    # enforcement point, not a duplicate of it.
+    $events = [ordered]@{
+        UserPromptSubmit = $GateTimeoutSec
+        PreToolUse       = $QuickTimeoutSec
+    }
+
+    foreach ($eventName in $events.Keys) {
+        $entry = [pscustomobject]@{
+            matcher = ''
+            hooks   = @([pscustomobject]@{
+                    type    = 'command'
+                    command = $command
+                    timeout = $events[$eventName]
+                })
+        }
+
+        $existing = @()
+        if ($null -ne $settings.hooks.PSObject.Properties[$eventName]) {
+            $existing = @($settings.hooks.$eventName)
+        }
+
+        # Other tools register their own hooks here, and Orca's is also named
+        # claude-hook.cmd, so the full path is matched rather than the file
+        # name. Matching loosely would silently delete another tool's hook.
+        $kept = @($existing | Where-Object {
+                $text = ($_ | ConvertTo-Json -Depth 10 -Compress)
+                $text -notlike "*$posixCmd*"
             })
+
+        $settings.hooks | Add-Member -NotePropertyName $eventName -NotePropertyValue (@($entry) + $kept) -Force
     }
-
-    $existing = @()
-    if ($null -ne $settings.hooks.PSObject.Properties['UserPromptSubmit']) {
-        $existing = @($settings.hooks.UserPromptSubmit)
-    }
-
-    # Other tools register their own UserPromptSubmit hooks here, and Orca's is
-    # also named claude-hook.cmd, so the full path is matched rather than the
-    # file name. Matching loosely would silently delete another tool's hook.
-    $kept = @($existing | Where-Object {
-            $text = ($_ | ConvertTo-Json -Depth 10 -Compress)
-            $text -notlike "*$posixCmd*"
-        })
-
-    $settings.hooks | Add-Member -NotePropertyName UserPromptSubmit -NotePropertyValue (@($entry) + $kept) -Force
 
     $json = $settings | ConvertTo-Json -Depth 100
     if (Set-ManagedContent -Path $settingsPath -Content $json) {
-        Set-Result 'claude-code' 'wired' "gate timeout ${GateTimeoutSec}s"
+        Set-Result 'claude-code' 'wired' "gate ${GateTimeoutSec}s, PreToolUse $HookMode"
         Write-Detail "wrote $settingsPath"
     }
     else {

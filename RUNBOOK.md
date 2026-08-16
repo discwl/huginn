@@ -239,6 +239,18 @@ $h.PSObject.Properties | ForEach-Object { "{0,-16} isArray={1}" -f $_.Name, ($_.
 (Get-Content "$HOME\.claude\settings.json" -Raw | ConvertFrom-Json).hooks.UserPromptSubmit |
   ForEach-Object { $_.hooks[0].command } | Select-String 'gortex'
 
+# 4a-ii. Claude needs PreToolUse too, or the deny posture is inert
+(Get-Content "$HOME\.claude\settings.json" -Raw | ConvertFrom-Json).hooks.PreToolUse |
+  ForEach-Object { $_.hooks[0].command } | Select-String 'claude-hook.cmd -Mode deny'
+# expect a match. UserPromptSubmit alone gates availability, not usage.
+
+# 4a-iii. Prove the block end to end (both hosts refuse the call, not just advise)
+$probe = @{ hook_event_name='PreToolUse'; cwd=(Get-Location).Path; tool_name='Grep'
+            tool_input=@{ pattern='<an-indexed-symbol>' } } | ConvertTo-Json -Compress
+$probe | & "$HOME\.gortex\agent-hooks\claude-hook.cmd"  -Mode deny   # expect permissionDecision=deny
+$probe | & "$HOME\.gortex\agent-hooks\copilot-hook.ps1" -Mode deny   # expect the same JSON, verbatim
+# A pattern matching nothing indexed returns NO output at all — that is not a failure.
+
 # 4b. MCP registered on BOTH Copilot surfaces — they read different files
 copilot mcp get gortex          # expect: Status: Enabled, Command: gortex mcp
 (Get-Content "$env:APPDATA\Code\User\mcp.json" -Raw | ConvertFrom-Json -AsHashtable).servers.gortex.command   # expect: gortex
@@ -291,21 +303,44 @@ $env:GORTEX_CODEX_REQUIRED   = '0'
 
 ### What "required" does and does not mean
 
-`GORTEX_*_REQUIRED` gates **availability, not usage**. It refuses to start a turn when the graph cannot answer — daemon down, unreachable, or still indexing. Once the state is `Ready` the gate allows silently, and nothing after that compels the model to choose a graph tool over `grep`.
+`GORTEX_*_REQUIRED` gates **availability, not usage**. It refuses to start a turn when the graph cannot answer — daemon down, unreachable, or still indexing. Once the state is `Ready` the gate allows silently. Usage is enforced separately, by the hook posture.
 
-Tool preference is carried by two softer channels, and a model may ignore both:
+Under the default `deny` posture the `PreToolUse` hook is **a real block, not advice** — on both Claude Code and Copilot CLI. Gortex replies with `hookSpecificOutput.permissionDecision = "deny"`, and Copilot's tool loop acts on it; the call never runs and the transcript shows `Denied by preToolUse hook`. It reads the *nested* field because entries registered under the PascalCase event names are tagged `_vsCodeCompat` when the config loads, so Gortex's native Claude-shaped reply needs no translation. `hooks/copilot-hook.ps1` therefore forwards a denial verbatim instead of flattening it into `additionalContext` — flattening demotes a hard block to a suggestion, which is what previously left the graph optional under `deny`.
 
-- the rule block in `~\.copilot\copilot-instructions.md` (section 13), and
-- the `PreToolUse` nudge, which is **advisory on Copilot**. Copilot honours `{"decision":"block"}` only on `UserPromptSubmit`; on `PreToolUse` it reads `additionalContext` and ignores `decision`, exit code 2, and `{"continue":false}`. Gortex's own enrichment is best-effort too — it returns nothing when the prompt matches no indexed symbol.
+> Verified on Copilot CLI 1.0.80. An earlier note here claimed `PreToolUse` was advisory on Copilot and that only `UserPromptSubmit` honoured a block. That was wrong. `{"decision":"block"}`, a top-level `permissionDecision`, and the nested `hookSpecificOutput` form all block a `PreToolUse` call. Exit code 2 and `{"continue":false}` are still ignored.
+
+**Gortex registers Claude hooks, but they never run.** `gortex install --agents claude-code` **does** write eight events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, `SubagentStop`, `PreCompact`) — into `~\.claude\settings.local.json`, not `settings.json`, which is why they are easy to miss. It writes `--mode=<posture>` only when the posture is **not** the default, so a bare `gortex.exe hook` is a `deny` entry:
+
+```powershell
+# what the mode string means
+Get-Content "$HOME\.claude\settings.local.json" -Raw | ConvertFrom-Json |
+  ForEach-Object { $_.hooks.PreToolUse[0].hooks[0].command }
+# 'gortex.exe hook'               -> deny  (default; no flag written)
+# 'gortex.exe hook --mode=enrich' -> enrich (explicitly chosen at install time)
+```
+
+The posture is right and the JSON is well formed, but **Claude does not load a user-scope `~\.claude\settings.local.json`**, so all eight are inert. `gortex install` still reports `all hooks already present`, so nothing surfaces the gap. That is why the kit registers its own `UserPromptSubmit` (readiness gate, long timeout) and `PreToolUse` (deny posture, quick timeout) in `~\.claude\settings.json`. The `PreToolUse` entry is **not** a duplicate — it is Claude's only working enforcement point. `Repair-GortexAgentKit.ps1` flags a missing one as `Claude Code PreToolUse hook not registered`.
+
+> Verified on Claude Code 2.1.233, three ways. (1) With the kit's `settings.json` `PreToolUse` removed, a `Grep` for an indexed symbol **ran**. (2) It still ran after correcting Gortex's entry from `matcher: "*"` to `""`, ruling out the matcher. (3) Replacing Gortex's `PreToolUse` *and* `SessionStart` commands with a sentinel that appends to a file produced **no file at all** across a full session — the hooks are never invoked. Restoring the kit's entry blocks the same `Grep`. Note this also means Gortex's `SessionStart` orientation and `PostToolUse` localization hooks are not running on Claude either.
+
+The block is **selective, not total**, so it is a strong default rather than an absolute guarantee:
+
+- Gortex only denies when the tool argument matches an indexed symbol. On a tracked repo, `Grep` is hard-denied; `Read` and `Glob` return advisory `additionalContext` only.
+- A prompt matching nothing indexed returns no hook output at all.
+- The rule block in `~\.copilot\copilot-instructions.md` (section 13) remains a soft channel the model may ignore.
 
 To make the graph the *only* option, remove the built-in file tools so the model never sees them:
 
 ```powershell
 copilot --excluded-tools view,grep,glob
 copilot --available-tools gortex     # stricter: only Gortex tools survive
+
+claude --disallowedTools Read,Grep,Glob
 ```
 
-`--available-tools` and `--excluded-tools` filter what the model can see; `--allow-tool` / `--deny-tool` only control approval prompts and cannot re-expose a filtered tool. Neither filter has a persisted `config.json` equivalent, so it must be passed per invocation — wrap it in a shell alias if you want it always on. Verify with `copilot help permissions`.
+Claude's MCP tools are named `mcp__<server>__<tool>` — this machine's `permissions.allow` lists them individually (`mcp__gortex__search`, `mcp__gortex__read`, …), which is the form to reuse for `--allowedTools`.
+
+`--available-tools` and `--excluded-tools` filter what the model can see; `--allow-tool` / `--deny-tool` only control approval prompts and cannot re-expose a filtered tool. Neither filter has a persisted `config.json` equivalent, so it must be passed per invocation — wrap it in a shell alias if you want it always on. Verify with `copilot help permissions`. Claude's `--allowedTools` / `--disallowedTools` (also spelled `--allowed-tools` / `--disallowed-tools`) are per-invocation too, but unlike Copilot they *do* have a persisted equivalent: the `permissions.allow` / `permissions.deny` arrays in `~\.claude\settings.json`, which this machine already uses to auto-approve the read-only Gortex MCP tools.
 
 ---
 
@@ -767,8 +802,12 @@ Gortex writes the Claude and Codex equivalents itself, but not in the same form.
 - **Claude Code runs hooks through POSIX `sh` on Windows**, not `cmd`. That is why its hook command is shell script invoking `claude-hook.cmd`, which `sh` can exec directly.
 - **Copilot loads two instruction files at once.** `~\.copilot\copilot-instructions.md` **and** `~\.copilot\instructions\*.md` are both read in the same session — verified by planting a sentinel token in one and having a fresh `copilot -p` session echo it back alongside a value only the other file carries. Writing the canonical file blind would therefore hand the model the same rule block twice on any machine that already keeps one under `instructions\`, and the two copies would drift apart at the next profile switch. The installer reuses whichever file already owns the block; `Update-GortexAgents.ps1` refreshes every file that carries it.
 - **Gortex's agent name is `claude-code`**; its hook wire-protocol flag is `--agent=claude`. Two different namespaces.
-- **Copilot CLI has no Gortex adapter**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned, and its MCP server and rule block are kit-written too. `gortex install` has no `copilot` target — passing one is an error.
+- **Copilot CLI has no Gortex adapter in any released build**, so `~\.copilot\hooks\gortex.json` is entirely kit-owned, and its MCP server and rule block are kit-written too. On v0.63.3 `gortex install` has no `copilot` target — passing one, in any spelling (`copilot`, `copilot-cli`, `copilotcli`), is an error. **This is changing.** `internal/agents/copilotcli/` (adapter, hooks, skills, subagents) landed upstream on 2026-08-15, three days after the v0.63.3 release, and `gortex hook` on `main` now accepts `--agent=copilot-cli`. None of it is in a tagged release yet. When it ships, the kit's Copilot wiring becomes a duplicate rather than the only implementation, and this section needs re-testing before upgrading — check `gortex install --print-config copilot-cli` first.
+- **An unknown `--agent` value fails silently.** `gortex hook --agent=<anything-unrecognised>` exits **0** and writes **nothing** — byte-identical to a posture that decided not to act. Verified by control: on v0.63.3, `--agent=bogus-agent-xyz`, `--agent=opencode`, and `--agent=copilot-cli` all return 0 bytes, while `--agent=claude` returns a 731-byte deny. So pointing an adapter at a protocol newer than the installed binary disables enforcement invisibly — no error, no log line, exactly like a model choosing to ignore advice. Confirm a protocol responds before trusting it, and never assume a name is supported because the flag was accepted.
+- **The kit's OpenCode plugin is about to collide with a native one.** On v0.63.3 `gortex install --agents opencode` writes **only** MCP config (`opencode.json`, key `mcp`) and no plugin, so `~\.config\opencode\plugin\gortex-context.js` is unambiguously kit-owned. Upstream added `internal/agents/opencode/plugin.go` on 2026-08-15, which installs its own `gortex.js` into **the same directory** — and OpenCode loads every plugin in that folder, so once it ships both will run and each will probe the daemon per event. Its posture default matches the kit's: `normalizeHookMode` maps `enrich`, `consult-unlock` and `nudge` literally and everything else — including an empty value — to **`deny`**. Before upgrading past v0.63.3, check `gortex install --print-config opencode` for a `plugin` path and drop the kit's copy if one appears.
+- **Codex is the only agent that does not default to deny.** `ParseCodexMode` maps `deny`/`hard-deny`, `rewrite`/`input-rewrite`, and `suppress`/`replace-output`/`output-suppression`, and falls through to `CodexModeEnrich` for everything else, including empty. Claude, OpenCode, and the kit's Copilot shim all default to `deny`. That asymmetry is why the installer writes `--mode=deny` explicitly for Codex instead of relying on the default — an omitted flag means `deny` everywhere else and `enrich` here.
 - **Copilot only runs a hook whose event value is a JSON array.** `"UserPromptSubmit": [ { ... } ]` runs; `"UserPromptSubmit": { ... }` is parsed without complaint and then never executed — no error, no log line, and `copilot mcp`/`--log-level all` show nothing. The failure looks exactly like an agent that ignores its instructions. PowerShell makes this easy to write by accident: a function that does `return @($one)` unrolls the single-element array back to a scalar, and `ConvertTo-Json` then emits the dead bare-object form. `New-CopilotHook` returns `, @(...)` for precisely this reason. Verify shape, not just presence — see the check in section 6.
+- **Copilot honours a `PreToolUse` denial.** `hookSpecificOutput.permissionDecision = "deny"` stops the call and the transcript reads `Denied by preToolUse hook`. It reads the *nested* Claude-shaped field because entries registered under the PascalCase event names are tagged `_vsCodeCompat` at config load, so a Gortex reply needs no translation — see section 7. Do not flatten a denial into `additionalContext`; that turns a block into a suggestion.
 - **Copilot in VS Code shells out to the CLI.** Its bootstrapper lives at `%APPDATA%\Code\User\globalStorage\github.copilot-chat\copilotCli\copilot.ps1`; it resolves the real `copilot` binary on PATH, version-checks it, and execs it with an unmodified environment. Hooks, skills, and instructions therefore need no second wiring — **only MCP does**, because the Chat panel reads `%APPDATA%\Code\User\mcp.json` instead.
 - **Gortex's `vscode` adapter writes the wrong scope for this purpose.** `gortex install --agents vscode` writes a **repo-local** `.vscode\mcp.json`, which covers only the folder that was open when it ran. The kit writes the user profile so every workspace is covered. It still installs no hooks and no skills, and has no effect on the agent host.
 - **`deferTools` is not a Copilot CLI setting.** It appears in neither the JS bundle nor the native binary, so it is accepted into the JSON and silently ignored. The kit does not write it, and preserves it if you already have it.

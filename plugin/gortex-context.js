@@ -44,11 +44,82 @@ const TOOL_NAME_MAP = {
 
 const ENRICHED_TOOLS = new Set(["bash", "grep", "glob", "read"]);
 
+// Gortex resolves "is this file indexed?" by comparing the incoming path
+// against the tracked-repo root as raw bytes, and it only normalises a path on
+// its relative branch. On Windows a forward-slash absolute path, an MSYS
+// `/c/...` path, or a case difference all miss a backslash-canonical root and
+// come back "not indexed", so the enrichment is dropped. config.yaml holds the
+// canonical spelling, so it is the reference for the rewrite.
+const CONFIG_PATH = `${process.env.USERPROFILE ?? process.env.HOME}\\.gortex\\config.yaml`;
+
+let trackedRootsCache = null;
+
+function trackedRoots() {
+  if (trackedRootsCache) return trackedRootsCache;
+
+  trackedRootsCache = [];
+  try {
+    const text = require("node:fs").readFileSync(CONFIG_PATH, "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/^\s*-?\s*path:\s*['"]?([^'"#]+?)['"]?\s*$/);
+      if (match) trackedRootsCache.push(match[1].replace(/[\\/]+$/, ""));
+    }
+    // Longest first, so a repo nested inside another re-cases against its own
+    // root, matching the longest-match rule the daemon applies.
+    trackedRootsCache.sort((a, b) => b.length - a.length);
+  } catch {
+    // An unreadable registry only costs the case pass; separators still get fixed.
+  }
+  return trackedRootsCache;
+}
+
+function canonicalPath(value) {
+  if (typeof value !== "string" || !value) return value;
+
+  // Only drive-absolute runs are touched. A bare leading slash belongs to
+  // regexes, globs and URLs far more often than to a Windows path.
+  let text = value
+    .replace(/(?<![A-Za-z0-9])\/([A-Za-z])\//g, (_m, d) => `${d.toUpperCase()}:/`)
+    .replace(
+      /(?<![A-Za-z0-9])([A-Za-z]):\/([^\s"'<>|]*)/g,
+      (_m, d, rest) => `${d}:\\${rest.replace(/\//g, "\\")}`,
+    );
+
+  for (const root of trackedRoots()) {
+    const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    text = text.replace(new RegExp(escaped, "gi"), root);
+  }
+  return text;
+}
+
+// Only the copy sent to Gortex is rewritten; OpenCode still runs its own
+// original tool input. `command` matters most: a shell command is the one field
+// no host normalises, which makes it the field the policy leaks through.
+function normalizePayload(payload) {
+  try {
+    const next = { ...payload };
+    if (typeof next.cwd === "string") next.cwd = canonicalPath(next.cwd);
+
+    if (next.tool_input && typeof next.tool_input === "object") {
+      const toolInput = { ...next.tool_input };
+      for (const field of ["file_path", "path", "notebook_path", "command"]) {
+        if (typeof toolInput[field] === "string") {
+          toolInput[field] = canonicalPath(toolInput[field]);
+        }
+      }
+      next.tool_input = toolInput;
+    }
+    return next;
+  } catch {
+    return payload;
+  }
+}
+
 async function callGortex(payload) {
   let proc;
   try {
     proc = Bun.spawn(["gortex", "hook", "--agent=claude", "--mode=enrich"], {
-      stdin: new TextEncoder().encode(JSON.stringify(payload)),
+      stdin: new TextEncoder().encode(JSON.stringify(normalizePayload(payload))),
       stdout: "pipe",
       stderr: "ignore",
     });

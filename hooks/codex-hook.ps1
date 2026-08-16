@@ -26,7 +26,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $Mode = 'enrich',
+    [string] $Mode = 'deny',
     [string] $Agent = 'codex'
 )
 
@@ -112,8 +112,11 @@ try {
     }
 
     # Enrichment is forwarded verbatim: Gortex already speaks Codex's wire
-    # format, so its reply needs no translation.
-    $response = ($raw | & $gortex hook "--agent=$Agent" "--mode=$Mode" 2>$null | Out-String).Trim()
+    # format, so its reply needs no translation. The outbound payload is
+    # canonicalised first so a POSIX-spelled path in a shell command still
+    # resolves to its tracked repo.
+    $payload = ConvertTo-GortexNormalizedPayload $raw
+    $response = ($payload | & $gortex hook "--agent=$Agent" "--mode=$Mode" 2>$null | Out-String).Trim()
     if (-not [string]::IsNullOrWhiteSpace($response)) {
         [Console]::Out.Write($response)
     }

@@ -131,6 +131,195 @@ function Get-GortexCacheRoot {
     return (Join-Path $HOME '.gortex\cache')
 }
 
+function Get-GortexConfigPath {
+    if (-not [string]::IsNullOrWhiteSpace($env:GORTEX_HOME)) {
+        return (Join-Path $env:GORTEX_HOME 'config.yaml')
+    }
+    return (Join-Path $HOME '.gortex\config.yaml')
+}
+
+function Get-GortexCanonicalRepoRoots {
+    <#
+        The tracked-repo roots, in the exact spelling Gortex compares against.
+
+        config.yaml is read rather than the readiness cache because it is the
+        same source Gortex's own hook uses, and it is authoritative before any
+        readiness probe has run. Every entry is stored there already cleaned,
+        so the file supplies the canonical casing and separator directly.
+
+        Memoised for the process: a hook invocation is short-lived and the
+        registry cannot change underneath it.
+    #>
+
+    if ($null -ne $script:GortexCanonicalRoots) {
+        return $script:GortexCanonicalRoots
+    }
+
+    $roots = New-Object System.Collections.ArrayList
+    try {
+        $path = Get-GortexConfigPath
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            foreach ($line in (Get-Content -LiteralPath $path)) {
+                $match = [regex]::Match($line, '^\s*-?\s*path:\s*[''"]?(?<p>[^''"#]+?)[''"]?\s*$')
+                if ($match.Success) {
+                    $value = $match.Groups['p'].Value.TrimEnd([IO.Path]::DirectorySeparatorChar)
+                    if (-not [string]::IsNullOrWhiteSpace($value)) {
+                        [void] $roots.Add($value)
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        # An unreadable registry only costs the case-correction pass; the
+        # separator rewrite below still applies.
+    }
+
+    # Longest first, so a repo nested inside another re-cases against its own
+    # root. That mirrors the longest-match rule the daemon applies.
+    $script:GortexCanonicalRoots = @($roots | Sort-Object -Property Length -Descending)
+    return $script:GortexCanonicalRoots
+}
+
+function ConvertTo-GortexCanonicalPath {
+    <#
+        Rewrite one value into the path spelling Gortex's access policy can
+        actually match on Windows.
+
+        Gortex resolves "is this file indexed?" by comparing the incoming path
+        against the tracked-repo root as raw bytes (internal/hooks
+        session_paths.go trackedRepoForPath), and it only normalises a path on
+        the relative branch. filepath.IsAbs("C:/x") is true on Windows, so a
+        forward-slash absolute path reaches that comparison untouched, misses a
+        backslash-canonical root, and is reported as not indexed. The hard deny
+        then degrades to advice, silently. A case difference misses the same
+        way and degrades further, emitting nothing at all.
+
+        Three rewrites, each a no-op when it does not apply:
+
+          1. MSYS / Git Bash form (/c/Repos/x) to drive form. Git Bash is a very
+             common Windows shell for agents, and this is the spelling a model
+             reaches for most often in a shell command.
+          2. Drive-absolute forward slashes to backslashes.
+          3. Any embedded tracked root re-cased to its registered spelling.
+
+        Only drive-absolute runs are touched. A bare leading slash is left
+        alone because it belongs to regexes, globs and URLs far more often than
+        to Windows paths, and rewriting those would corrupt the very argument
+        the policy is trying to classify.
+    #>
+    param([string] $Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $Value
+    }
+
+    $text = $Value
+
+    # /c/Repos/x -> C:/Repos/x. The lookbehind keeps this off "https://host/a/b"
+    # and any other mid-token slash pair.
+    $text = [regex]::Replace($text, '(?<![A-Za-z0-9])/([A-Za-z])/', {
+            param($m) $m.Groups[1].Value.ToUpperInvariant() + ':/'
+        })
+
+    # C:/Repos/x -> C:\Repos\x, stopping at whitespace and shell quoting so a
+    # single rewrite cannot swallow the rest of a command line.
+    $text = [regex]::Replace($text, '(?<![A-Za-z0-9])([A-Za-z]):/([^\s"''<>|]*)', {
+            param($m) $m.Groups[1].Value + ':\' + $m.Groups[2].Value.Replace('/', '\')
+        })
+
+    # Re-case embedded roots. IndexOf is used rather than a regex so a root
+    # containing regex metacharacters needs no escaping, and the scan walks the
+    # whole value because in a shell command the path is rarely at position 0.
+    foreach ($root in (Get-GortexCanonicalRepoRoots)) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+
+        $index = $text.IndexOf($root, [StringComparison]::OrdinalIgnoreCase)
+        while ($index -ge 0) {
+            if ($text.Substring($index, $root.Length) -cne $root) {
+                $text = $text.Remove($index, $root.Length).Insert($index, $root)
+            }
+            $next = $index + $root.Length
+            if ($next -ge $text.Length) {
+                break
+            }
+            $index = $text.IndexOf($root, $next, [StringComparison]::OrdinalIgnoreCase)
+        }
+    }
+
+    return $text
+}
+
+function ConvertTo-GortexNormalizedPayload {
+    <#
+        Canonicalise every path-bearing field of a hook payload before it is
+        handed to `gortex hook`.
+
+        Only the copy sent to Gortex is rewritten. The host agent executes its
+        own original tool input, so this cannot change what a tool does; it
+        changes only what Gortex is asked to classify. `command` is included
+        because a shell command is the one field the host cannot normalise for
+        us, which makes it the field the policy actually leaks through.
+
+        Any failure returns the payload untouched. A hook that cannot parse its
+        input must still forward it rather than break the turn.
+    #>
+    param([string] $Raw)
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) {
+        return $Raw
+    }
+
+    try {
+        $event = $Raw | ConvertFrom-Json
+        if ($null -eq $event) {
+            return $Raw
+        }
+
+        $changed = $false
+
+        if ($null -ne $event.PSObject.Properties['cwd']) {
+            $current = [string] $event.cwd
+            $rewritten = ConvertTo-GortexCanonicalPath $current
+            if ($rewritten -cne $current) {
+                $event.cwd = $rewritten
+                $changed = $true
+            }
+        }
+
+        $toolInput = $null
+        if ($null -ne $event.PSObject.Properties['tool_input']) {
+            $toolInput = $event.tool_input
+        }
+
+        if ($null -ne $toolInput) {
+            foreach ($field in @('file_path', 'path', 'notebook_path', 'command')) {
+                if ($null -eq $toolInput.PSObject.Properties[$field]) {
+                    continue
+                }
+
+                $current = [string] $toolInput.$field
+                $rewritten = ConvertTo-GortexCanonicalPath $current
+                if ($rewritten -cne $current) {
+                    $toolInput.$field = $rewritten
+                    $changed = $true
+                }
+            }
+        }
+
+        if (-not $changed) {
+            return $Raw
+        }
+
+        return ($event | ConvertTo-Json -Depth 25 -Compress)
+    }
+    catch {
+        return $Raw
+    }
+}
+
 function Get-ReadinessCachePath {
     return Join-Path (Get-GortexCacheRoot) 'agent-readiness.json'
 }

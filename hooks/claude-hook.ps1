@@ -17,7 +17,11 @@
 
     Enrichment is unchanged. The payload is forwarded to `gortex hook`, whose
     default wire protocol is already Claude Code, and its response is passed
-    through untouched.
+    through untouched. That verbatim passthrough is what makes the `deny`
+    posture bite: a PreToolUse reply carrying `permissionDecision` reaches
+    Claude in the shape it already understands, so a Grep against indexed
+    source is refused rather than merely discouraged. Rewriting the reply into
+    context, as the Copilot shim once had to, would demote the block to advice.
 
 .NOTES
     On Windows, Claude Code executes hook commands through POSIX `sh`, not cmd.
@@ -26,7 +30,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $Mode = 'enrich'
+    [string] $Mode = 'deny'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,8 +112,12 @@ try {
     }
 
     # `gortex hook` already speaks Claude Code by default, so its reply needs no
-    # translation and is forwarded verbatim.
-    $response = ($raw | & $gortex hook "--mode=$Mode" 2>$null | Out-String).Trim()
+    # translation and is forwarded verbatim. The payload going the other way is
+    # canonicalised first: Claude normalises its own tool paths, but a shell
+    # command is opaque to it, so `cat /c/Repos/x/main.py` reaches Gortex in a
+    # spelling its tracked-repo comparison cannot match.
+    $payload = ConvertTo-GortexNormalizedPayload $raw
+    $response = ($payload | & $gortex hook "--mode=$Mode" 2>$null | Out-String).Trim()
     if (-not [string]::IsNullOrWhiteSpace($response)) {
         [Console]::Out.Write($response)
     }
