@@ -1,329 +1,152 @@
+#Requires -Version 7.2
 <#
 .SYNOPSIS
-    Propagates the installed Gortex binary's instructions and skills to every agent.
-
+    Refresh native Gortex integrations in deny mode, optionally upgrading first.
 .DESCRIPTION
-    Gortex carries its agent-facing instruction text and its skill set inside the
-    binary. Only Claude Code consumes them live: ~/.claude/CLAUDE.md @-includes
-    ~/.gortex/instructions/active.md, so switching profiles or upgrading Gortex
-    reaches it immediately.
+    Requires a working native Gortex installation, version 0.64.0 or newer
+    after any requested upgrade. Always runs native install, including when an
+    upgrade finds the binary already current. Gortex owns instructions, skills,
+    hooks, and MCP configuration. This wrapper checks installation results and
+    runs daemon status and doctor.
 
-    Codex, Copilot CLI, and OpenCode instead received an inline *copy* of that
-    text, frozen at the moment it was written. Nothing re-synchronises them, so
-    they drift silently on the next `gortex upgrade` or `gortex instructions
-    switch` while Claude looks correct.
+    All supported native provider hooks use deny mode. Codex requires its own
+    environment setting; Claude and OpenCode use --hook-mode=deny, and Copilot
+    CLI's native hook defaults to deny. No legacy hook-mode inference is needed.
 
-    Copilot has no Gortex adapter at all -- `gortex install --agents copilot`
-    fails with "unknown agent name" -- so its instruction file is maintained
-    entirely outside Gortex.
-
-    This script closes that gap:
-
-      instructions  Rewrites only the span between the gortex:rules markers in
-                    each inline file, from ~/.gortex/instructions/active.md.
-                    Everything outside the markers -- YAML frontmatter, and any
-                    house rules of your own -- is preserved byte for byte.
-
-      skills        Refreshes ~/.claude/skills from the binary, then re-runs the
-                    mirror so skills added by an upgrade gain a junction and
-                    skills removed by one are pruned. Existing skills need no
-                    action: the mirror uses junctions, so their content already
-                    follows the source.
-
-    "Latest" means the installed binary, not the network. Pass -Upgrade to fetch
-    a newer Gortex first.
-
+    Run Remove-LegacyGortexKit.ps1 before migrating an old kit installation.
+    This script does not track worktrees, edit repository policy, or reindex.
 .EXAMPLE
     .\Update-GortexAgents.ps1 -WhatIf
-
 .EXAMPLE
-    .\Update-GortexAgents.ps1
-
-.EXAMPLE
-    # Fetch a newer Gortex, then propagate everything it brought.
     .\Update-GortexAgents.ps1 -Upgrade
-
 .EXAMPLE
-    # Switch every agent to the lean profile, not just Claude.
-    .\Update-GortexAgents.ps1 -Profile localization
+    .\Update-GortexAgents.ps1 -Agents codex,claude-code,copilot-cli,opencode -Profile core
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    # Run `gortex upgrade --run` first. This is the only step that uses the network.
     [switch] $Upgrade,
-
-    # Switch the active instruction profile before propagating it.
     [ValidateSet('core', 'localization', 'full')]
     [string] $Profile,
-
-    # Config tree to write into. Override only for a sandbox or another profile.
-    [string] $ConfigRoot = $HOME,
-
-    [string] $KitRoot = $PSScriptRoot,
-
-    [switch] $SkipInstructions,
-
-    [switch] $SkipSkills,
-
-    # Rewrite instruction blocks even when they already match.
-    [switch] $Force
+    [string[]] $Agents,
+    [string] $GortexPath
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$PSNativeCommandUseErrorActionPreference = $false
 
-$startMarker = '<!-- gortex:rules:start -->'
-$endMarker = '<!-- gortex:rules:end -->'
-
-function Get-Normalized {
-    param([string] $Text)
-    if ($null -eq $Text) { return '' }
-    return ($Text -replace "`r`n", "`n").Trim()
+foreach ($agent in $Agents) {
+    if ($agent -notmatch '^[a-z][a-z0-9-]*$') {
+        throw "Invalid native agent name: $agent"
+    }
 }
 
-# Windows PowerShell 5.1 decodes a BOM-less file as ANSI, which mangles the em
-# dashes in the instruction profile, while -Encoding UTF8 writes a BOM that
-# pwsh 7 would not. Either way the content comparison below sees a difference
-# and rewrites the file on every run, so text I/O goes through .NET instead.
-$script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
-
-function Read-TextFile {
-    param([string] $Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    return [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+# A preview must not invoke a binary or download anything.
+if ($WhatIfPreference) {
+    if ($Upgrade) { Write-Host '[update] Would upgrade the selected Gortex installation.' }
+    if ($Profile) { Write-Host "[update] Would switch the native instruction profile to $Profile." }
+    Write-Host '[update] Would set GORTEX_CODEX_HOOK_MODE=deny for native installation, run install --yes --json --hook-mode=deny, daemon status, and doctor.'
+    return
+}
+if (-not $PSCmdlet.ShouldProcess('native Gortex installation and agent configuration', 'Refresh integrations in deny mode (and upgrade if requested)')) {
+    return
 }
 
-function Write-TextFile {
-    param([string] $Path, [string] $Content)
-    [IO.File]::WriteAllText($Path, $Content, $script:Utf8NoBom)
-}
-
-function Backup-File {
-    param([Parameter(Mandatory)][string] $Path)
-
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $backup = "$Path.bak-$stamp"
-    Copy-Item -LiteralPath $Path -Destination $backup -Force
-    return $backup
-}
-
-# A shell started before Gortex was installed carries a PATH snapshot that
-# predates it, so Get-Command alone fails on a perfectly healthy machine.
-# Re-read the persisted PATH, then fall back to the default install location.
-$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-$env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ';'
-
-$gortexExe = (Get-Command gortex -ErrorAction SilentlyContinue)
-if ($null -ne $gortexExe) {
-    $gortexExe = $gortexExe.Source
+if ($GortexPath) {
+    $gortexExe = (Resolve-Path -LiteralPath $GortexPath).ProviderPath
 }
 else {
-    $fallback = Join-Path $ConfigRoot 'AppData\Local\Programs\gortex\gortex.exe'
-    if (Test-Path -LiteralPath $fallback -PathType Leaf) {
-        $gortexExe = $fallback
-        Write-Warning "gortex found at $fallback but not on PATH; open a new shell to pick it up."
+    $command = Get-Command gortex -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { $gortexExe = $command.Source }
+    elseif ($IsWindows -and $env:LOCALAPPDATA -and (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs/gortex/gortex.exe') -PathType Leaf)) {
+        $gortexExe = Join-Path $env:LOCALAPPDATA 'Programs/gortex/gortex.exe'
+        Write-Warning 'Using the default Windows installation; open a new shell to refresh PATH.'
     }
-    else {
-        throw "gortex not found on PATH. Install it first: irm https://get.gortex.dev/install.ps1 | iex"
-    }
+    else { throw 'gortex was not found. Install it using the official Gortex installer, then run this script again.' }
 }
-
 Write-Host "[update] gortex: $gortexExe"
-Write-Host ('[update] version: ' + ((& $gortexExe version 2>&1 | Select-Object -First 1) -join ''))
 
-# ---------------------------------------------------------------- upgrade ----
-
-if ($Upgrade) {
-    if ($PSCmdlet.ShouldProcess('gortex', 'upgrade --run')) {
-        Write-Host '[update] Upgrading Gortex...'
-        & $gortexExe upgrade --run
-        if ($LASTEXITCODE -ne 0) {
-            throw "gortex upgrade failed with exit code $LASTEXITCODE."
-        }
-        Write-Host ('[update] now: ' + ((& $gortexExe version 2>&1 | Select-Object -First 1) -join ''))
+function Invoke-Gortex {
+    param([string[]] $Arguments, [switch] $Capture)
+    $lines = @(& $gortexExe @Arguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "gortex $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
     }
+    if ($Capture) { return ($lines -join "`n") }
+    $lines | ForEach-Object { Write-Host $_ }
 }
 
-# ----------------------------------------------------------- instructions ----
+function Get-GortexVersion {
+    $versionText = Invoke-Gortex -Arguments @('version') -Capture
+    Write-Host "[update] $versionText"
+    if ($versionText -notmatch '(?i)\bv?(\d+\.\d+\.\d+)') { throw "Cannot parse Gortex version: $versionText" }
+    return [version]$Matches[1]
+}
 
-if (-not $SkipInstructions) {
-    # regen and switch are machine-global: they always write ~/.gortex/instructions
-    # and ignore -ConfigRoot. Running them against a sandbox would silently mutate
-    # the live profile set, so they are skipped unless this is the real config tree.
-    $isLiveRoot = ($ConfigRoot -eq $HOME)
-
-    if (-not $isLiveRoot) {
-        Write-Warning "ConfigRoot is not `$HOME; skipping 'instructions regen'/'switch' because both are machine-global."
-    }
-
-    # Regenerate the profile files from whichever binary is now installed. This
-    # keeps the active selection, so it is safe to run unconditionally.
-    if ($isLiveRoot -and $PSCmdlet.ShouldProcess('instruction profiles', 'gortex instructions regen')) {
-        & $gortexExe instructions regen 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "gortex instructions regen exited $LASTEXITCODE; continuing with the files on disk."
+$previousCodexMode = [Environment]::GetEnvironmentVariable('GORTEX_CODEX_HOOK_MODE', 'Process')
+$previousInstallDir = [Environment]::GetEnvironmentVariable('GORTEX_INSTALL_DIR', 'Process')
+try {
+    # Native install bakes this into Codex's hook commands. Restoring the shell
+    # environment afterward does not undo the installed deny posture.
+    $env:GORTEX_CODEX_HOOK_MODE = 'deny'
+    $version = Get-GortexVersion
+    if ($Upgrade) {
+        # v0.64.0's upgrade detector misses the official Windows install location.
+        # Reuse the official installer for precisely that installation; package
+        # manager and other recognized installations use native upgrade --run.
+        $defaultWindowsExe = if ($IsWindows -and $env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs/gortex/gortex.exe' } else { '' }
+        if ($defaultWindowsExe -and [IO.Path]::GetFullPath($gortexExe).Equals([IO.Path]::GetFullPath($defaultWindowsExe), [StringComparison]::OrdinalIgnoreCase)) {
+            $env:GORTEX_INSTALL_DIR = Split-Path -Parent $gortexExe
+            Write-Host '[update] Running the official Windows installer.'
+            $installer = Invoke-RestMethod -Uri 'https://get.gortex.dev/install.ps1'
+            & ([scriptblock]::Create([string]$installer))
         }
-    }
-
-    if ($Profile -and $isLiveRoot) {
-        if ($PSCmdlet.ShouldProcess($Profile, 'gortex instructions switch')) {
-            & $gortexExe instructions switch $Profile 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "gortex instructions switch $Profile failed with exit code $LASTEXITCODE."
+        else {
+            $upgradeArgs = @('upgrade', '--run')
+            if ($version -ge [version]'0.64.0') { $upgradeArgs += '--no-migrate' }
+            $upgradeOutput = Invoke-Gortex -Arguments $upgradeArgs -Capture
+            Write-Host $upgradeOutput
+            if ($upgradeOutput -match '(?i)unrecogni[sz]ed method') {
+                throw 'Gortex cannot upgrade this installation automatically. Use its original installer or package manager, then rerun this script without -Upgrade.'
             }
-            Write-Host "[update] Active profile: $Profile"
         }
+        $version = Get-GortexVersion
     }
-
-    $activePath = Join-Path $ConfigRoot '.gortex\instructions\active.md'
-    if (-not (Test-Path -LiteralPath $activePath -PathType Leaf)) {
-        throw "Instruction source not found: $activePath. Run 'gortex install' first."
+    if ($version -lt [version]'0.64.0') {
+        throw "Gortex $version is too old; version 0.64.0 or newer is required. Rerun with -Upgrade or update using the original installation method."
     }
+    if ($Profile) { Invoke-Gortex -Arguments @('instructions', 'switch', $Profile) }
 
-    $body = (Read-TextFile $activePath).Trim()
-    Write-Host "[update] Source: $activePath ($($body.Length) chars)"
-
-    # Claude is deliberately absent: its CLAUDE.md @-includes active.md, so it
-    # already tracks the source and rewriting it would only freeze a copy.
-    #
-    # Every file that carries the markers is refreshed, including more than one
-    # per agent. Copilot genuinely loads both ~\.copilot\copilot-instructions.md
-    # and ~\.copilot\instructions\*.md at the same time -- verified by planting a
-    # sentinel in one and having a fresh `copilot -p` session echo it back next
-    # to a value only the other carries -- so refreshing just one would leave a
-    # second, contradictory copy of the rules in the model's context.
-    #
-    # Creating files is the installer's job, not this script's. Refreshing only
-    # what already exists keeps one definition of where each agent's block lives.
-    $targets = @()
-
-    $candidates = @(
-        [pscustomobject]@{ Agent = 'copilot';  Path = Join-Path $ConfigRoot '.copilot\copilot-instructions.md' }
-        [pscustomobject]@{ Agent = 'codex';    Path = Join-Path $ConfigRoot '.codex\AGENTS.md' }
-        [pscustomobject]@{ Agent = 'opencode'; Path = Join-Path $ConfigRoot '.config\opencode\AGENTS.md' }
-    )
-
-    $copilotInstrDir = Join-Path $ConfigRoot '.copilot\instructions'
-    if (Test-Path -LiteralPath $copilotInstrDir -PathType Container) {
-        foreach ($f in @(Get-ChildItem -LiteralPath $copilotInstrDir -File -Filter '*.md' -ErrorAction SilentlyContinue | Sort-Object Name)) {
-            $candidates += [pscustomobject]@{ Agent = 'copilot'; Path = $f.FullName }
-        }
+    $installArgs = @('install', '--yes', '--json', '--hook-mode=deny')
+    if ($Agents) { $installArgs += '--agents=' + ($Agents -join ',') }
+    $installOutput = Invoke-Gortex -Arguments $installArgs -Capture
+    try { $report = ConvertFrom-Json -InputObject $installOutput -AsHashtable }
+    catch { throw "gortex install returned invalid JSON: $installOutput" }
+    if ($report -isnot [System.Collections.IDictionary] -or -not $report.Contains('agents')) {
+        throw 'gortex install did not return agent installation results.'
     }
-
-    foreach ($c in $candidates) {
-        if (Test-Path -LiteralPath $c.Path -PathType Leaf) { $targets += $c }
+    $configured = @()
+    $failed = @()
+    foreach ($result in $report.agents) {
+        Write-Host "[update] $($result.name): detected=$($result.detected), configured=$($result.configured)"
+        foreach ($warning in $result['warnings']) { Write-Warning "$($result.name): $warning" }
+        if ($result.configured) { $configured += $result.name }
+        elseif ($result.detected) { $failed += $result.name }
     }
-
-    if ($targets.Count -eq 0) {
-        Write-Warning 'No instruction files found. Run Install-GortexAgentKit.ps1 first.'
+    if ($failed.Count) { throw "Native installation failed for: $($failed -join ', '). See the warnings above." }
+    foreach ($agent in $Agents) {
+        if ($agent -notin $configured) { throw "Requested agent '$agent' was not configured by native install." }
     }
+    if (-not $configured.Count) { throw 'No agents were configured. Install a supported provider or specify -Agents.' }
 
-    foreach ($t in $targets) {
-        $text = Read-TextFile $t.Path
-        $label = '{0}/{1}' -f $t.Agent, (Split-Path -Leaf $t.Path)
-
-        # Must match `gortex install` byte for byte -- start marker, LF, body,
-        # blank line, end marker -- which Install-GortexAgentKit.ps1 also emits.
-        # Gortex owns this same block in the Codex and OpenCode files, so three
-        # writers now agree on one format. Any difference, even a comment naming
-        # the manager, makes them rewrite each other forever.
-        $block = ($startMarker + "`n" + $body.Trim() + "`n`n" + $endMarker)
-
-        $startIdx = $text.IndexOf($startMarker)
-        $endIdx = $text.IndexOf($endMarker)
-
-        if ($startIdx -ge 0 -and $endIdx -lt $startIdx) {
-            Write-Warning ("  {0} markers are out of order; leaving the file alone." -f $label)
-            continue
-        }
-
-        if (($startIdx -lt 0) -ne ($endIdx -lt 0)) {
-            Write-Warning ("  {0} only one gortex:rules marker found; leaving the file alone." -f $label)
-            continue
-        }
-
-        if ($startIdx -lt 0) {
-            # A file that never carried the block is left alone. Adding one here
-            # would silently give an agent a second copy of the rules whenever
-            # another file in the same tree already has it.
-            Write-Host ("  {0,-42} no gortex block; skipped" -f $label)
-            continue
-        }
-
-        $current = $text.Substring($startIdx, ($endIdx + $endMarker.Length) - $startIdx)
-        if (-not $Force -and (Get-Normalized $current) -eq (Get-Normalized $block)) {
-            Write-Host ("  {0,-42} current" -f $label)
-            continue
-        }
-
-        $newText = $text.Substring(0, $startIdx) + $block + $text.Substring($endIdx + $endMarker.Length)
-
-        if ($PSCmdlet.ShouldProcess($t.Path, 'Sync gortex rules block')) {
-            $backup = Backup-File $t.Path
-            Write-TextFile $t.Path $newText
-            Write-Host ("  {0,-42} updated  (backup: {1})" -f $label, (Split-Path -Leaf $backup))
-        }
-        else {
-            Write-Host ("  {0,-42} would update" -f $label)
-        }
-    }
-
-    $claudeMd = Join-Path $ConfigRoot '.claude\CLAUDE.md'
-    if (Test-Path -LiteralPath $claudeMd -PathType Leaf) {
-        if ((Get-Content -LiteralPath $claudeMd -Raw) -match '@.*instructions[\\/]active\.md') {
-            Write-Host '  claude    tracks active.md via @-include; nothing to write'
-        }
-        else {
-            Write-Warning '  claude    CLAUDE.md has no @-include of active.md; run: gortex install --agents claude-code'
-        }
+    Invoke-Gortex -Arguments @('daemon', 'status')
+    Invoke-Gortex -Arguments @('doctor')
+    Write-Host '[update] Native configuration refreshed in deny mode. Open fresh provider sessions; use /hooks in Codex to review new or changed hooks.'
+    if ($Upgrade) {
+        Write-Host '[update] Review project-local gortex init configuration and release reindex guidance separately, once per primary repository.'
     }
 }
-
-# ------------------------------------------------------------------ skills ----
-
-if (-not $SkipSkills) {
-    $skillSource = Join-Path $ConfigRoot '.claude\skills'
-    $before = @()
-    if (Test-Path -LiteralPath $skillSource -PathType Container) {
-        $before = @(Get-ChildItem -LiteralPath $skillSource -Directory -Filter 'gortex-*' | ForEach-Object { $_.Name })
-    }
-
-    # Rewrites ~/.claude/skills from the binary. --no-hooks matters: a plain
-    # `gortex install` re-adds its own [[hooks.*]] blocks on every run, which is
-    # how duplicate hook entries accumulate in ~/.codex/config.toml.
-    if ($PSCmdlet.ShouldProcess('skills', 'gortex install --agents claude-code --no-hooks --no-claude-md')) {
-        Write-Host '[update] Refreshing skill source from the binary...'
-        & $gortexExe install --agents claude-code --claude-config-dir (Join-Path $ConfigRoot '.claude') `
-            --no-hooks --no-claude-md --yes 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "gortex install exited $LASTEXITCODE; mirroring whatever is on disk."
-        }
-    }
-
-    $after = @()
-    if (Test-Path -LiteralPath $skillSource -PathType Container) {
-        $after = @(Get-ChildItem -LiteralPath $skillSource -Directory -Filter 'gortex-*' | ForEach-Object { $_.Name })
-    }
-
-    $added = @($after | Where-Object { $before -notcontains $_ })
-    $removed = @($before | Where-Object { $after -notcontains $_ })
-
-    Write-Host ("[update] Skills in source: {0} (added {1}, removed {2})" -f $after.Count, $added.Count, $removed.Count)
-    if ($added.Count) { Write-Host ('  added:   ' + ($added -join ', ')) }
-    if ($removed.Count) { Write-Host ('  removed: ' + ($removed -join ', ')) }
-
-    # -Prune is what deletes junctions for skills the upgrade dropped; without it
-    # a removed skill lingers in the mirror as a dangling reparse point.
-    $sync = Join-Path $KitRoot 'Sync-AgentSkills.ps1'
-    if (-not (Test-Path -LiteralPath $sync -PathType Leaf)) {
-        throw "Sync-AgentSkills.ps1 not found next to this script: $sync"
-    }
-
-    & $sync -SourceRoot $skillSource `
-        -TargetRoot @([IO.Path]::Combine($ConfigRoot, '.agents', 'skills')) `
-        -Prune `
-        -WhatIf:$WhatIfPreference
+finally {
+    [Environment]::SetEnvironmentVariable('GORTEX_CODEX_HOOK_MODE', $previousCodexMode, 'Process')
+    [Environment]::SetEnvironmentVariable('GORTEX_INSTALL_DIR', $previousInstallDir, 'Process')
 }
-
-Write-Host '[update] Done. Restart every agent: instructions and skills load at session start.'

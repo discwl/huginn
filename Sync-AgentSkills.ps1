@@ -1,35 +1,24 @@
 <#
 .SYNOPSIS
-    Mirrors Gortex's Claude-only skills into the shared agent skill root.
-
+    Optionally mirrors explicitly selected, unrelated skills into a shared root.
 .DESCRIPTION
-    `gortex install` writes skills for exactly one adapter: Claude Code, under
-    ~/.claude/skills. Every other agent it configures gets MCP wiring and hooks
-    but no skills, so Copilot CLI and Codex never see the gortex-* skills.
-
-    Both of those agents read ~/.agents/skills:
-      * Copilot CLI discovers it directly.
-      * Codex discovers it in addition to ~/.codex/skills, which is why entries
-        under ~/.agents/skills already appear in its [[skills.config]] toggles.
-
-    Mirroring into that single root therefore reaches both without registering
-    the same skill twice.
-
-    Junctions are the default because Gortex rewrites its skills on every
-    upgrade. A junction picks the new content up automatically, whereas copies
-    silently rot until someone remembers to re-run this script.
-
+    Native Gortex installs its own skills. This helper always excludes gortex-*
+    from both mirroring and pruning. It is not part of installation or updates.
+    Choose a narrow pattern for skills you own. Junctions are the Windows
+    default; copies require rerunning the helper to refresh their contents.
+    The historical .gortex-managed marker is retained for existing copies.
 .EXAMPLE
-    .\Sync-AgentSkills.ps1 -WhatIf
-
+    .\Sync-AgentSkills.ps1 -Pattern humanizer -WhatIf
 .EXAMPLE
-    .\Sync-AgentSkills.ps1 -Prune
+    .\Sync-AgentSkills.ps1 -Pattern humanizer
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $SourceRoot = [IO.Path]::Combine($HOME, '.claude', 'skills'),
 
-    [string[]] $Pattern = @('gortex-*'),
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string[]] $Pattern,
 
     # Reaches Copilot CLI and Codex at once. Add ~/.codex/skills only if Codex
     # ever stops reading the shared root; holding both registers duplicates.
@@ -102,14 +91,14 @@ function Remove-ManagedItem {
 }
 
 if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
-    throw "Skill source not found: $SourceRoot. Run 'gortex install' first."
+    throw "Skill source not found: $SourceRoot. Choose the directory containing the skills you want to mirror."
 }
 
 $sourceSkills = @(
     Get-ChildItem -LiteralPath $SourceRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object {
             $name = $_.Name
-            @($Pattern | Where-Object { $name -like $_ }).Count -gt 0
+            $name -notlike 'gortex-*' -and @($Pattern | Where-Object { $name -like $_ }).Count -gt 0
         } |
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf }
 )
@@ -177,6 +166,7 @@ foreach ($root in $TargetRoot) {
             Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
                 Where-Object {
                     $name = $_.Name
+                    $name -notlike 'gortex-*' -and
                     @($Pattern | Where-Object { $name -like $_ }).Count -gt 0 -and
                     $sourceNames -notcontains $name -and
                     (Test-ManagedLink $_.FullName)

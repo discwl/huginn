@@ -19,8 +19,8 @@
     walking the working tree, so this stays fast on very large repositories.
 
     The script only reports. Nothing is written to Gortex config; copy the
-    emitted block into the repo's entry in ~/.gortex/config.yaml, or pass it to
-    Manage-GortexWorktree.ps1 via -ExcludePattern.
+    emitted block into the primary repo's entry in ~/.gortex/config.yaml after
+    reviewing the suggestions against the current native exclusion policy.
 
 .EXAMPLE
     .\Analyze-RepoExclusions.ps1 -RepositoryPath C:\Repos\my-repo

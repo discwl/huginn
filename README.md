@@ -1,53 +1,74 @@
-# huginn
+# GortexKit
 
-Workstation setup kit for [Gortex](https://gortex.dev) across **Claude Code, GitHub Copilot CLI, Copilot in VS Code, Codex, and OpenCode** on Windows.
+Small maintenance tools for moving an existing GortexKit installation to native Gortex and keeping it current across machines. Requires PowerShell 7.2+ and Gortex 0.64.0+.
 
-Five names, four hook runtimes — Copilot in VS Code execs the same `copilot` binary as the terminal CLI and shares its hooks and skills, so wiring Copilot CLI covers both. MCP is the exception: the Chat panel is a separate runtime with its own server registry. Instructions go the other way — all three Copilot surfaces read `~\.copilot\copilot-instructions.md`, so one file covers the lot.
+Gortex now supplies the provider integrations and discovers linked worktrees. Paseo does not need this kit at runtime. A new machine can follow the [native setup steps](RUNBOOK.md#new-machine), including the deny settings for every provider; this repository is useful for migration, repeatable updates, and optional diagnostics.
 
-Gortex installs MCP servers and hooks on its own — but not for either Copilot surface. This kit closes five gaps it leaves open:
+## What changed
 
-- **Nothing checks whether a repository has finished indexing.** Registration takes seconds; a first index can take 15–20 minutes. In between, every graph query returns nothing and the agent silently falls back to raw file reads. The kit adds a readiness gate that waits.
-- **Skills install for Claude Code only.** Copilot CLI and Codex get none. The kit mirrors them.
-- **Neither Copilot surface gets the MCP server.** Gortex has no Copilot CLI adapter at all, and its `vscode` adapter writes a *repo-local* `.vscode\mcp.json` instead of the user profile. Both end up with skills that fail the moment they are invoked. The kit registers the server in `~\.copilot\mcp-config.json` and `%APPDATA%\Code\User\mcp.json`.
-- **Copilot is never told to prefer the graph.** `gortex install --claude-md` writes the rule block for Claude Code and there is no Copilot equivalent, so Copilot gets the tools and the skills but no instruction to use them. The kit writes `~\.copilot\copilot-instructions.md`.
-- **Exclusions are hand-guessed per repository.** The kit derives them from the repo itself.
+| Previous kit responsibility | Current owner / action |
+| --- | --- |
+| Claude, Codex, and Copilot PowerShell hooks; readiness waits | Native Gortex hooks; remove the legacy entries once |
+| Custom OpenCode context plugin | Native OpenCode integration |
+| Instruction copying and Gortex skill mirroring | `gortex install` and native instruction profiles |
+| Worktree setup, explicit tracking, reindexing, and teardown | Native automatic worktree views; remove the old Paseo commands |
+| Installing and repairing custom adapters | Retired; use the native installer and `gortex doctor` |
+| Refreshing an existing installation | `Update-GortexAgents.ps1` |
+| Removing old kit artifacts safely | `Remove-LegacyGortexKit.ps1` |
 
-## Install
+The [v0.64.0 release notes](https://github.com/zzet/gortex/releases/tag/v0.64.0) cover v0.63.0 through v0.64.0, including maintenance releases. The relevant changes are automatic checkout routing, a shared primary graph with branch changes, bounded indexing/search memory, broader provider support, and better upgrade diagnostics. The kit no longer implements substitutes for those features.
+
+## Migrate an existing machine
+
+First remove obsolete Gortex setup/teardown commands from your projects' Paseo configuration, preserving application setup. See the [migration runbook](RUNBOOK.md) for existing dedicated worktree registrations and manual review items.
+
+From this repository in PowerShell 7:
 
 ```powershell
-git clone https://github.com/discwl/huginn.git C:\huginn
-cd C:\huginn
-.\Install-GortexAgentKit.ps1 -WhatIf    # review
-.\Install-GortexAgentKit.ps1
+# Preview only; no files are changed.
+.\Remove-LegacyGortexKit.ps1
+
+# Apply recognized cleanup, with backups.
+.\Remove-LegacyGortexKit.ps1 -Apply
+
+# Upgrade the binary and refresh native provider configuration.
+.\Update-GortexAgents.ps1 -Upgrade
 ```
 
-Then restart every agent — hooks and skills load at session start.
+Cleanup preserves unknown or customized artifacts and prints warnings for review. It never removes repository registrations or the graph store. Backups are under `~/.gortexkit-backups/`; review them before deleting them.
 
-Full instructions, per-repo configuration, verification, and troubleshooting are in **[RUNBOOK.md](RUNBOOK.md)**, which is written to be handed to a coding agent:
+## Routine updates
 
-> Read `C:\huginn\RUNBOOK.md` and set up this machine. Run the verification section at the end and report the results.
+```powershell
+# Refresh configuration from the installed binary, even if it is already latest.
+.\Update-GortexAgents.ps1
 
-## Contents
+# Upgrade first, then always refresh configuration.
+.\Update-GortexAgents.ps1 -Upgrade
 
-| Path | Purpose |
-|---|---|
-| `Install-GortexAgentKit.ps1` | Detects agents, wires the gate, registers MCP for both Copilot surfaces, writes Copilot's rule block, mirrors skills. Idempotent, supports `-WhatIf` |
-| `Repair-GortexAgentKit.ps1` | Diagnoses and repairs the whole integration — daemon, tracking, index, hooks, MCP, instructions, skills. `-CheckOnly` makes it a health probe |
-| `Update-GortexAgents.ps1` | Propagates the installed binary's instructions and skills to Codex, Copilot and OpenCode after a `gortex upgrade` or `instructions switch`. Rewrites only the span between the rule markers |
-| `Analyze-RepoExclusions.ps1` | Derives per-repo exclusions from tracked content |
-| `Sync-AgentSkills.ps1` | Mirrors Gortex skills to Copilot CLI and Codex |
-| `hooks/gortex-readiness.ps1` | The readiness gate — single source of truth |
-| `hooks/*-hook.ps1` | Per-agent adapters |
-| `plugin/gortex-context.js` | OpenCode plugin |
-| `tests/opencode-plugin.test.mjs` | Exercises the plugin's gate and enrichment flow |
-| `transitional/` | Worktree lifecycle helper — see below |
+# Optional: choose native providers or an instruction profile.
+.\Update-GortexAgents.ps1 -Agents codex,claude-code,copilot-cli,opencode -Profile core
 
-## Transitional tier
+# Preview without invoking Gortex or downloading anything.
+.\Update-GortexAgents.ps1 -Upgrade -WhatIf
+```
 
-`transitional/Manage-GortexWorktree.ps1` registers Paseo-created worktrees with Gortex and waits for their first index. Native Gortex worktree support — automatic tracking and parallel per-worktree indexing — is expected shortly, at which point this becomes unnecessary.
+The updater delegates installation to Gortex, checks each agent's installation result, and runs `daemon status` and `doctor`. It installs **deny mode for Claude Code, Codex, Copilot CLI, and OpenCode**, including replacing an existing advisory/enrich setting. Open fresh provider sessions after refreshing, and review new or changed Codex hooks through `/hooks`.
 
-**Skip it on a new machine unless you need worktree indexing today.** It shares no code with the gate, so dropping it changes nothing else. Its `-Action Compact` and `-Action Status` remain useful regardless: the store is SQLite and never shrinks on delete, so compaction reclaims space with no re-indexing.
+For the official default Windows installation, `-Upgrade` uses the official Windows installer because v0.64.0's upgrade detector misses that location. Other installations use `gortex upgrade --run`. Package managers and custom paths are covered in the [runbook](RUNBOOK.md).
 
-## Requirements
+## Optional utilities
 
-Windows, PowerShell 7+, Gortex 0.63.3+, Git. `sqlite3` only for store compaction; `node` only to run the OpenCode plugin tests.
+- `Analyze-RepoExclusions.ps1`: reports exclusion candidates for a large primary repository. Review its suggestions before changing native policy; it writes no configuration.
+- `Sync-AgentSkills.ps1`: explicit mirroring for unrelated skills, such as `-Pattern humanizer`. It excludes `gortex-*` skills; native Gortex manages those.
+
+Neither utility belongs in a Paseo setup/teardown hook or the normal Gortex update path.
+
+## Validation
+
+```powershell
+pwsh -NoProfile -File tests/update.test.ps1
+pwsh -NoProfile -File tests/cleanup.test.ps1
+```
+
+Tests use a fake Gortex executable and temporary configuration directories. They do not install software or change the machine's provider configuration. Actual provider activation and a fresh Paseo worktree are the final checks on each machine; follow the [runbook](RUNBOOK.md).
