@@ -95,10 +95,12 @@ export class WorkspaceLibrary {
     return { selectedPath: path, canonicalPath: canonical, repositoryRoot, gitDirectoryKind, tracking, repository, warnings, observedAt: new Date().toISOString() };
   }
 
-  async status(input: RepositoryContext) {
+  async status(input: RepositoryContext): Promise<{ value: unknown; meta: unknown; observedAt: string; scope: "host" }> {
     const repository = await this.context(input);
+    // workspace.index reads the whole daemon store, even when the session selects one repo/workspace.
+    // Keep that effect explicit across RPC; the selected repository only authorizes the connection.
     const report = await this.native.query(repository.path, "index");
-    return { ...report, observedAt: new Date().toISOString() };
+    return { ...report, observedAt: new Date().toISOString(), scope: "host" };
   }
 
   async search(input: RepositoryContext & { query: string; cursor: string | null; limit: number }): Promise<SearchPage> {

@@ -119,6 +119,29 @@ test("following relationships at the grant limit keeps the active symbol availab
   } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
 });
 
+test("index totals remain explicitly host-scoped across repository and workspace selections", async () => {
+  const f = await fixture();
+  const totals = { status: "ready", indexed_file_count: 2464, node_count: 46870, edge_count: 194905 };
+  try {
+    f.setReply(totals);
+    const a = await f.library.status({ repositoryPath: f.paths[0], workspaceId: "workspace-a" });
+    const b = await f.library.status({ repositoryPath: f.paths[1], workspaceId: "workspace-b" });
+    for (const report of [a, b]) {
+      assert.equal(report.scope, "host", "native aggregate totals must never be described as repository totals");
+      assert.deepEqual(report.value, totals);
+      assert.deepEqual(report.meta, { fixture: true });
+      assert.ok(Number.isFinite(Date.parse(report.observedAt)));
+    }
+    const calls = f.queryCount();
+    await assert.rejects(f.library.status({ repositoryPath: f.paths[0], workspaceId: "workspace-b" }), /workspace|changed/i);
+    assert.equal(f.queryCount(), calls, "a shared report must still validate the selected host repository context");
+    f.setReply({ status: "refreshing", message: "Report pending" });
+    const pending = await f.library.status({ repositoryPath: f.paths[0], workspaceId: "workspace-a" });
+    assert.equal(pending.scope, "host");
+    assert.deepEqual(pending.value, { status: "refreshing", message: "Report pending" });
+  } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
 test("folder inspection resolves a real nested Git directory without tracking it", async () => {
   const f = await fixture();
   try {
