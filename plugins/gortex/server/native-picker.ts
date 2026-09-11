@@ -5,31 +5,39 @@ import { realpath, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
-import { runProcess } from "./process-runner.ts";
-import { powershellArguments, WINDOWS_PICKER_PROBE, WINDOWS_PICKER_SCRIPT } from "./windows-dialog.ts";
+import { powershellArguments, WINDOWS_PICKER_SCRIPT } from "./windows-dialog.ts";
+import { findWindowsPickerRuntime, type PickerRuntime } from "./windows-picker-runtime.ts";
 
 type PickerState = { id: string; state: "open" | "selected" | "cancelled" | "error"; path: string | null; error: string | null };
 type Job = { result: PickerState; child: ChildProcess; timer: ReturnType<typeof setTimeout>; finishedAt: number | null };
-type Dependencies = { platform?: string; spawn?: typeof spawn; probe?: () => Promise<boolean>; timeoutMs?: number };
+type Dependencies = { platform?: string; spawn?: typeof spawn; probe?: () => Promise<PickerRuntime>; timeoutMs?: number };
 const replySchema = z.discriminatedUnion("state", [z.object({ state: z.literal("selected"), path: z.string().min(1).max(32767) }), z.object({ state: z.literal("cancelled"), path: z.null() })]);
 
 export class NativeFolderPicker {
   private jobs = new Map<string, Job>();
   private starting = false;
   private closed = false;
-  private capability: Promise<{ available: boolean; reason: string }> | null = null;
+  private runtime: Promise<PickerRuntime> | null = null;
   private dependencies: Dependencies;
   constructor(dependencies: Dependencies = {}) { this.dependencies = dependencies; }
 
-  capabilities() {
-    if (!this.capability) this.capability = (async () => {
-      if ((this.dependencies.platform ?? process.platform) !== "win32") return { available: false, reason: "The folder picker requires a Windows host." };
-      try {
-        const available = this.dependencies.probe ? await this.dependencies.probe() : z.object({ available: z.boolean() }).parse(JSON.parse(await runProcess("pwsh.exe", powershellArguments(WINDOWS_PICKER_PROBE), homedir()))).available;
-        return { available, reason: available ? "The dialog opens on this host's Windows desktop." : "No interactive Windows desktop is available on this host." };
-      } catch { return { available: false, reason: "The folder picker requires PowerShell 7 with Windows Forms and an interactive Windows desktop." }; }
-    })();
-    return this.capability;
+  private resolveRuntime(): Promise<PickerRuntime> {
+    if (!this.runtime) {
+      const pending = (async (): Promise<PickerRuntime> => {
+        if ((this.dependencies.platform ?? process.platform) !== "win32") return { available: false, executable: null, reason: "The folder picker requires a Windows host." };
+        try { return await (this.dependencies.probe ?? findWindowsPickerRuntime)(); }
+        catch { return { available: false, executable: null, reason: "Could not check the Windows folder picker on this host. Try Browse again, or reload the Gortex plugin." }; }
+      })();
+      this.runtime = pending;
+      // Share in-flight discovery, but allow a newly installed runtime or desktop session to be found.
+      void pending.then(result => { if (!result.available && this.runtime === pending) this.runtime = null; });
+    }
+    return this.runtime;
+  }
+
+  async capabilities() {
+    const { available, reason } = await this.resolveRuntime();
+    return { available, reason };
   }
 
   async start(initialPath?: string) {
@@ -38,15 +46,15 @@ export class NativeFolderPicker {
     if (this.starting || [...this.jobs.values()].some(job => job.result.state === "open")) throw new Error("A folder picker is already open on this Windows host. Finish or cancel it first.");
     this.starting = true;
     try {
-      const capability = await this.capabilities();
-      if (!capability.available) throw new Error(capability.reason);
+      const runtime = await this.resolveRuntime();
+      if (!runtime.available) throw new Error(runtime.reason);
       const path = initialPath ?? homedir();
       if (!isAbsolute(path) || path.includes("\0")) throw new Error("Choose an absolute folder path.");
       const canonical = await realpath(path);
       if (!(await stat(canonical)).isDirectory()) throw new Error("The selected starting path is not a folder.");
       if (this.closed) throw new Error("The plugin is stopping.");
       const id = randomUUID();
-      const child = (this.dependencies.spawn ?? spawn)("pwsh.exe", powershellArguments(WINDOWS_PICKER_SCRIPT), { cwd: homedir(), shell: false, windowsHide: true, env: { ...process.env, PASEO_GORTEX_PICKER_START: canonical }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = (this.dependencies.spawn ?? spawn)(runtime.executable, powershellArguments(WINDOWS_PICKER_SCRIPT), { cwd: homedir(), shell: false, windowsHide: true, env: { ...process.env, PASEO_GORTEX_PICKER_START: canonical }, stdio: ["ignore", "pipe", "pipe"] });
       const job: Job = { result: { id, state: "open", path: null, error: null }, child, timer: setTimeout(() => this.finish(id, "error", null, "The Windows picker timed out. Open it again to choose a folder.", true), this.dependencies.timeoutMs ?? 120000), finishedAt: null };
       job.timer.unref();
       this.jobs.set(id, job);

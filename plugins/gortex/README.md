@@ -6,7 +6,13 @@ repository metadata and exclusions.
 
 ## Current features
 
-- Host-scoped workspace and repository catalog using Gortex's native identities.
+- A full-width, host-scoped repository library with name/path search, configured
+  workspace/project filters, sorting, and 12 rows per page. Filters cover the entire
+  native assignment catalog, including repositories beyond the first 50 entries.
+- Focused repository search/settings views with an **All repositories** return
+  action that preserves library filters and page. Compact screens stack row metadata.
+- A compact daemon status strip and a separate **Host health** tab for detailed
+  daemon and index metrics, so shared totals are not repeated inside each repo.
 - Daemon health, uptime, graph counts, memory, MCP sessions, and language-server
   state. Health refreshes every 30 seconds while the panel is active.
 - On-demand reported token savings and **host index health**. The native
@@ -54,8 +60,10 @@ are gated to the verified 0.64.3 contract and are unavailable for unverified ver
 
 Gortex must be available on the Paseo daemon account's `PATH`, with its existing
 configuration and shared daemon accessible to that account. The Windows folder
-picker requires PowerShell 7 (`pwsh`) and an interactive Windows desktop. Other
-panels use the host connection and do not require desktop access.
+picker requires PowerShell 7 with Windows Forms and an interactive Windows desktop.
+It checks `PATH` and standard MSI, WindowsApps, and .NET tool installation paths.
+Failed checks are retried, so installing PowerShell does not require restarting the
+shared Paseo daemon. Other panels use the host connection without desktop access.
 
 ## Install on another host
 
@@ -120,6 +128,27 @@ npm run typecheck
 paseo plugin reload gortex --host 127.0.0.1:6767 --json
 ```
 
+## Windows folder picker troubleshooting
+
+If Browse reports that PowerShell cannot start, install PowerShell 7 **on the selected
+host**, using the account that runs Paseo. Microsoft's documented MSI install command
+is:
+
+```powershell
+winget install --id Microsoft.PowerShell --source winget --installer-type wix
+```
+
+See [Microsoft's installation guide](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows)
+for hosts without WinGet. Update this plugin and reload `gortex` on that host, then
+reopen the Gortex screen so its capability check runs again. Standard installations
+are detected even if the running Paseo process has an older `PATH`.
+
+If the check instead reports no interactive desktop, run Paseo in a signed-in Windows
+desktop session on that host and use Remote Desktop to operate the folder dialog.
+Installing PowerShell does not give a service or a headless host desktop access.
+An unavailable Windows Forms message indicates that the installed runtime needs to
+be repaired or replaced with a compatible PowerShell 7 installation.
+
 ## Development and validation
 
 ```powershell
@@ -129,8 +158,7 @@ npm test
 
 The Node test runner covers adapters, response validation, host/selection isolation,
 directory and picker handling, request sharing, symbol inspection, and metadata jobs.
-The current suite has 72 passing tests. Separate isolated native integration
-exercises verified metadata repair, exclusion removal/reinclusion, and isolation of
+Separate isolated native integration exercises verified metadata repair, exclusion removal/reinclusion, and isolation of
 a second repository. The index scope fixture uses three repositories across two
 workspaces and verifies that the shared native index report includes all three.
 Run it explicitly with `node --experimental-strip-types server/index-native-fixture.ts`.
