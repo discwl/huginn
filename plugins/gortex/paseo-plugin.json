@@ -1,4 +1,7 @@
 {
   "id": "gortex",
-  "requirements": { "paseo": ">=0.8.0-beta.1 <0.9.0" }
+  "requirements": { "paseo": ">=0.8.0-beta.1 <0.9.0" },
+  "build": [
+    ["node", "server/prepare-install.mjs"]
+  ]
 }
