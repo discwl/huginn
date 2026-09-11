@@ -1,0 +1,40 @@
+import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { hostHealthRpc } from "./shared/health-contracts.ts";
+import { hostSavingsRpc } from "./shared/savings-contracts.ts";
+import { readHostSavings } from "./server/host-savings.ts";
+import { readHostHealth } from "./server/host-health.ts";
+import { NativeFolderPicker } from "./server/native-picker.ts";
+import { nativePickerCapabilitiesRpc, nativePickerStartRpc, nativePickerPollRpc, nativePickerCancelRpc } from "./shared/native-picker-contracts.ts";
+import { catalogRpc, directoryRpc, inspectRpc, preferences, searchRpc, statusRpc, symbolRpc } from "./shared/contracts.ts";
+import { DirectoryBrowser } from "./server/directory-browser.ts";
+import { GortexClient } from "./server/gortex-client.ts";
+import { WorkspaceLibrary } from "./server/workspace-library.ts";
+import { RepositoryMetadata } from "./server/repository-metadata.ts";
+import { metadataReadRpc, metadataPreviewRpc, metadataRepairRpc, metadataApplyRpc, metadataJobRpc } from "./shared/metadata-contracts.ts";
+
+export default function contribute(server: PluginServerContext) {
+  const nativePicker = new NativeFolderPicker();
+  server.handle(hostHealthRpc, () => readHostHealth(native));
+  server.handle(hostSavingsRpc, readHostSavings);
+  server.handle(nativePickerCapabilitiesRpc, () => nativePicker.capabilities());
+  server.handle(nativePickerStartRpc, ({ initialPath }) => nativePicker.start(initialPath));
+  server.handle(nativePickerPollRpc, ({ id }) => nativePicker.poll(id));
+  server.handle(nativePickerCancelRpc, ({ id }) => nativePicker.cancel(id));
+  const native = new GortexClient();
+  const library = new WorkspaceLibrary(native);
+  const directories = new DirectoryBrowser();
+  server.registerSettings(preferences);
+  server.handle(catalogRpc, input => library.catalog(input.offset));
+  server.handle(directoryRpc, input => directories.list(input));
+  server.handle(inspectRpc, input => library.inspect(input.path));
+  server.handle(statusRpc, input => library.status(input));
+  server.handle(searchRpc, input => library.search(input));
+  server.handle(symbolRpc, input => library.symbol(input));
+  const metadata = new RepositoryMetadata(native, undefined, () => library.close());
+  server.handle(metadataReadRpc, ({ path }) => metadata.read(path));
+  server.handle(metadataPreviewRpc, ({ path, revision, configured, exclude }) => metadata.preview(path, revision, configured, exclude));
+  server.handle(metadataRepairRpc, ({ path, revision }) => metadata.previewRepair(path, revision));
+  server.handle(metadataApplyRpc, ({ id }) => metadata.apply(id));
+  server.handle(metadataJobRpc, ({ id }) => metadata.job(id));
+  return async () => { directories.close(); nativePicker.close(); await metadata.close(); library.close(); await native.close(); };
+}

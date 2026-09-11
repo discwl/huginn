@@ -1,0 +1,162 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { homedir } from "node:os";
+import { realpath } from "node:fs/promises";
+import { z } from "zod";
+import { nativeAssignmentSchema, nativeInfoSchema, type NativeAssignment, type NativeInfo } from "../shared/models.ts";
+import { decodeNativeResult, NativeError } from "./native-response.ts";
+import { runProcess } from "./process-runner.ts";
+
+interface Connection { client: Client; ready: Promise<void>; active: number; touched: number }
+export interface NativePort {
+  assignments(): Promise<NativeAssignment[]>;
+  info(cwd: string): Promise<NativeInfo>;
+  version(): Promise<string>;
+  query(cwd: string, operation: "index" | "search" | "source" | "callers" | "dependencies" | "usages" | "implementations" | "impact", args?: Record<string, unknown>): Promise<{ value: unknown; meta: unknown }>;
+  close(): Promise<void>;
+}
+
+import { sampleDaemonHealth } from "./health-snapshot.ts";
+import type { DaemonHealth } from "../shared/health-models.ts";
+
+export class GortexClient implements NativePort {
+  private binary: string;
+  private connections = new Map<string, Connection>();
+  private closed = false;
+  private admission: Promise<void> = Promise.resolve();
+  constructor(binary = "gortex") { this.binary = binary; }
+
+  async assignments(): Promise<NativeAssignment[]> {
+    const raw = await runProcess(this.binary, ["workspace", "list", "--json"], homedir());
+    try { return z.array(nativeAssignmentSchema).parse(JSON.parse(raw)); }
+    catch { throw new NativeError("catalog_shape", "Unsupported native workspace catalog response; update the adapter fixtures before continuing."); }
+  }
+
+  async version(): Promise<string> {
+    const output = await runProcess(this.binary, ["version"], homedir(), { maxBytes: 4096 });
+    const match = /^gortex v0\.64\.(\d+)(?:\+[^\s]+)?/m.exec(output);
+    if (!match || Number(match[1]) < 2) throw new NativeError("unsupported_version", "This adapter requires Gortex 0.64.2 or a compatible 0.64 patch release.");
+    return match[0];
+  }
+
+  private async acquire(key: string): Promise<Connection> {
+    let unlock!: () => void;
+    const prior = this.admission;
+    this.admission = new Promise(resolve => { unlock = resolve; });
+    await prior;
+    try {
+      if (this.closed) throw new NativeError("closed", "Gortex plugin connection is closed.");
+      let connection = this.connections.get(key);
+      if (!connection) {
+        if (this.connections.size >= 4) {
+          const idle = [...this.connections].filter(([, value]) => value.active === 0).sort((a, b) => a[1].touched - b[1].touched)[0];
+          if (!idle) throw new NativeError("busy", "Gortex connection budget is busy. Retry after the current query completes.");
+          this.connections.delete(idle[0]);
+          await idle[1].client.close();
+        }
+        if (this.closed) throw new NativeError("closed", "Gortex plugin connection is closed.");
+        const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+        // Other documented presets select legacy names. Compact supplies the effect-split facade.
+        env.GORTEX_TOOLS = "compact";
+        const transport = new StdioClientTransport({ command: this.binary, args: ["mcp", "--proxy", "--tools", "compact"], cwd: key, env, stderr: "ignore" });
+        const client = new Client({ name: "paseo-gortex", version: "0.1.0" });
+        connection = { client, ready: Promise.resolve(), active: 0, touched: Date.now() };
+        this.connections.set(key, connection);
+        connection.ready = client.connect(transport, { timeout: 15000 }).then(async () => {
+          const result = await client.listTools({}, { timeout: 15000 });
+          const names = new Set(result.tools.map(tool => tool.name));
+          for (const required of ["workspace", "search", "read", "relations", "change"]) {
+            if (!names.has(required)) throw new NativeError("missing_tool", `Gortex MCP integration is missing ${required}. Check the public tool preset.`);
+          }
+        });
+      }
+      connection.active++;
+      connection.touched = Date.now();
+      return connection;
+    } finally { unlock(); }
+  }
+
+  private async call(cwd: string, name: string, args: Record<string, unknown>, timeout = 20000): Promise<{ value: unknown; meta: unknown }> {
+    const key = await realpath(cwd);
+    const connection = await this.acquire(key);
+    let result: unknown;
+    try {
+      await connection.ready;
+      result = await connection.client.callTool({ name, arguments: args }, undefined, { timeout });
+    } catch (error) {
+      if (this.connections.get(key) === connection) this.connections.delete(key);
+      await connection.client.close().catch(() => {});
+      if (error instanceof NativeError) throw error;
+      throw new NativeError("mcp_unavailable", "Gortex MCP request failed. Verify the existing daemon is reachable, then refresh. The plugin does not start or restart it.");
+    } finally { connection.active--; }
+    // Semantic/native response errors do not tear down a healthy shared connection.
+    return decodeNativeResult(result);
+  }
+
+  async info(cwd: string): Promise<NativeInfo> {
+    const result = await this.call(cwd, "workspace", { operation: "info", arguments: { format: "json" } });
+    const parsed = nativeInfoSchema.safeParse(result.value);
+    if (!parsed.success) throw new NativeError("identity_shape", "Unsupported native context identity response.");
+    return parsed.data;
+  }
+
+  private healthRequests = new Map<string, Promise<DaemonHealth>>();
+
+  async daemonHealth(cwd: string): Promise<DaemonHealth> {
+    const key = await realpath(cwd);
+    const pending = this.healthRequests.get(key);
+    if (pending) return pending;
+    const request = (async () => {
+      const connection = await this.acquire(key);
+      try {
+        await connection.ready;
+        return await sampleDaemonHealth(connection.client);
+      } finally {
+        connection.active--;
+        if (!connection.client.transport && this.connections.get(key) === connection) this.connections.delete(key);
+      }
+    })().finally(() => { if (this.healthRequests.get(key) === request) this.healthRequests.delete(key); });
+    this.healthRequests.set(key, request);
+    return request;
+  }
+
+  query(cwd: string, operation: Parameters<NativePort["query"]>[1], args: Record<string, unknown> = {}): Promise<{ value: unknown; meta: unknown }> {
+    if (operation === "index") return this.call(cwd, "workspace", { operation: "index", arguments: { format: "json", max_bytes: 12000 } });
+    if (operation === "search") return this.call(cwd, "search", { operation: "symbols", query: args.query, options: { workspace: args.workspace, repo: args.repo, limit: args.limit, paginate: true, cursor: args.cursor ?? undefined, expand: "off" }, output: { format: "json" } });
+    if (operation === "source") return this.call(cwd, "read", { operation: "source", target: { symbol: args.symbolId }, output: { format: "json", max_bytes: 12000 } });
+    if (operation === "impact") return this.call(cwd, "change", { operation: "impact", target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
+    return this.call(cwd, "relations", { operation, target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
+  }
+
+  async reloadConfiguration(): Promise<void> {
+    await runProcess(this.binary, ["daemon", "reload"], homedir(), { timeoutMs: 60000, maxBytes: 16384 });
+  }
+
+  async rebuildIndex(cwd: string): Promise<void> {
+    const path = await realpath(cwd);
+    const result = await this.call(path, "workspace_admin", { operation: "index", arguments: { path } }, 120000);
+    const receipt = z.object({ node_count: z.number().int().nonnegative(), edge_count: z.number().int().nonnegative(), file_count: z.number().int().nonnegative() }).safeParse(result.value);
+    if (!receipt.success) throw new NativeError("index_shape", "Gortex did not return a supported index receipt. Reconcile the daemon before retrying.");
+  }
+
+  async refreshContexts(): Promise<void> {
+    let unlock!: () => void;
+    const prior = this.admission;
+    this.admission = new Promise(resolve => { unlock = resolve; });
+    await prior;
+    try {
+      const previous = [...this.connections.values()];
+      this.connections.clear();
+      this.healthRequests.clear();
+      await Promise.allSettled(previous.map(connection => connection.client.close()));
+    } finally { unlock(); }
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.admission;
+    const clients = [...this.connections.values()];
+    this.connections.clear();
+    await Promise.allSettled(clients.map(connection => connection.client.close()));
+  }
+}

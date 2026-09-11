@@ -1,0 +1,3 @@
+node_modules/
+*.tsbuildinfo
+server/.gortex-batch-*
