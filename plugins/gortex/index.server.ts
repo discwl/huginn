@@ -24,7 +24,7 @@ export default function contribute(server: PluginServerContext) {
   const library = new WorkspaceLibrary(native);
   const directories = new DirectoryBrowser();
   server.registerSettings(preferences);
-  server.handle(catalogRpc, input => library.catalog(input.offset));
+  server.handle(catalogRpc, input => library.catalog(input.offset, input));
   server.handle(directoryRpc, input => directories.list(input));
   server.handle(inspectRpc, input => library.inspect(input.path));
   server.handle(statusRpc, input => library.status(input));

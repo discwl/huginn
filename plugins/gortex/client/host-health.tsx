@@ -9,13 +9,24 @@ import { ReportedSavings } from "./reported-savings.tsx";
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
 function uptime(seconds: number) { const minutes = Math.floor(seconds / 60); return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
 
-export function HostHealth({ host, theme }: Props) {
+export function HostHealth({ host, theme, compact = false, onDetails }: Props & { compact?: boolean; onDetails?: () => void }) {
   const read = useRpc(hostHealthRpc);
   const [details, setDetails] = useState(false);
   const report = useQuery({ queryKey: [host.id, "gortex", "host-health"], queryFn: () => read({}), retry: false, refetchInterval: 30000, refetchIntervalInBackground: false, refetchOnWindowFocus: false });
   const health = report.data?.health;
   const stale = report.isError || !!(health && Date.now() - Date.parse(health.ts) > 90000);
   const state = health ? stale ? "Stale snapshot" : health.ready ? "Ready" : "Warming up" : report.isError || report.data?.error ? "Unavailable" : "Connecting";
+  if (compact) return <View style={{ gap: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }}>
+    <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12, flexShrink: 1 }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>{host.label} daemon</Text>
+        <Badge theme={theme} label={state} tone={state === "Ready" ? "success" : state === "Unavailable" || stale ? "danger" : "warning"} icon={state === "Ready" ? "CheckCircle2" : "Clock"} />
+        {health && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18, flexShrink: 1 }}>{health.tracked_repos} repos · {health.graph_nodes.toLocaleString()} nodes · {(health.alloc_bytes / 1048576).toFixed(1)} MiB · up {uptime(health.uptime_seconds)}</Text>}
+      </View>
+      {onDetails && <Action theme={theme} title="View health" icon="ArrowUpRight" onPress={onDetails} />}
+    </View>
+    {(report.error || report.data?.error) && <Notice theme={theme} error text={report.error?.message ?? report.data?.error ?? "Health is unavailable."} />}
+  </View>;
   return <Card theme={theme}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12 }}>

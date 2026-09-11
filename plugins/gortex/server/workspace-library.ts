@@ -8,6 +8,7 @@ import { runProcess } from "./process-runner.ts";
 import { QueryCache } from "./query-cache.ts";
 import { fitInspection, normalizeInspection } from "./symbol-inspection.ts";
 import type { InspectorOperation, SymbolSnapshot } from "../shared/symbol-inspection.ts";
+import { catalogInputSchema, pageAssignments, type CatalogInput } from "../shared/catalog-browser.ts";
 
 const administrationReason = "Tracking new repositories is not available in this preview. Edit workspace, project and name for existing repositories from Repository settings.";
 const searchResultSchema = z.object({ results: z.array(symbolSchema).max(50), total: z.number().optional(), next_cursor: z.string().optional().nullable(), truncated: z.boolean().optional(), fetch_escalated: z.boolean().optional() }).passthrough();
@@ -37,12 +38,14 @@ export class WorkspaceLibrary {
     } catch (error) { return { ...base, workspaceId: null, projectId: null, graphName: null, state: "unavailable", error: message(error) }; }
   }
 
-  async catalog(offset = 0): Promise<Catalog> {
+  async catalog(offset = 0, options: Partial<CatalogInput> = {}): Promise<Catalog> {
+    const input = catalogInputSchema.parse({ ...options, offset });
     const [version, rows] = await Promise.all([this.native.version(), this.native.assignments()]);
+    const { rows: visibleRows, ...page } = pageAssignments(rows, input);
     const repositories: Repository[] = [];
-    for (const row of rows.slice(offset, offset + 50)) repositories.push(await this.resolve(row));
+    for (const row of visibleRows) repositories.push(await this.resolve(row));
     return {
-      version, repositories, total: rows.length, nextOffset: offset + 50 < rows.length ? offset + 50 : null,
+      version, repositories, ...page,
       observedAt: new Date().toISOString(),
       warnings: ["Membership is the observed native session context. Index state is queried separately on demand.", "Exact checkout selection is unavailable until the native checkout/view contract is verified."],
       administration: { available: false, reason: administrationReason },

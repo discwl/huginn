@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { catalogFacetSchema } from "./catalog-browser.ts";
 
 export const pathSchema = z.string().min(1).max(32767).refine(value => !value.includes("\0"), "Paths cannot contain NUL");
 export const directoryInputSchema = z.object({
@@ -30,6 +31,8 @@ export const catalogSchema = z.object({
   version: z.string(), observedAt: z.string(),
   repositories: z.array(repositorySchema).max(50),
   total: z.number().int(), nextOffset: z.number().int().nullable(),
+  filteredTotal: z.number().int().nonnegative(), offset: z.number().int().nonnegative(),
+  workspaces: z.array(catalogFacetSchema), projects: z.array(catalogFacetSchema),
   warnings: z.array(z.string()),
   administration: z.object({ available: z.literal(false), reason: z.string() }),
 });

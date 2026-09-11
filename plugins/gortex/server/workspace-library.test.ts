@@ -36,6 +36,40 @@ test("catalog identities come from verified native context, never default displa
   } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
 });
 
+test("catalog filters the complete assignment list but resolves only visible repository contexts", async () => {
+  const f = await fixture();
+  const calls: string[] = [];
+  const info = f.native.info;
+  try {
+    const allRows = Array.from({ length: 120 }, (_, i) => ({ ...f.rows[0], repo: `unreachable-${i}`, path: join(f.root, `missing-${i}`), workspace: "other" }));
+    allRows.push({ ...f.rows[1], repo: "target", workspace: "configured-workspace", project: "selected-project" });
+    f.native.assignments = async () => allRows;
+    f.native.info = async cwd => { calls.push(cwd); return info(cwd); };
+    const catalog = await f.library.catalog(0, { query: "target", workspace: "configured-workspace", limit: 12 });
+    assert.equal(catalog.total, 121);
+    assert.equal(catalog.filteredTotal, 1);
+    assert.deepEqual(calls, [f.paths[1]], "off-page repositories must not open native sessions");
+    assert.equal(catalog.repositories[0].workspaceId, "workspace-b", "configured filters cannot substitute active graph scope");
+    assert.equal(catalog.repositories[0].declaredWorkspace, "configured-workspace");
+    assert.equal(catalog.repositories[0].name, "target");
+    assert.equal(catalog.repositories[0].graphName, "repo-1");
+    assert.equal(f.queryCount(), 0, "catalog browsing must not run graph analyses");
+  } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
+test("unavailable repository rows remain in filtered results with settings identities intact", async () => {
+  const f = await fixture();
+  try {
+    f.native.info = async () => { throw new Error("native connection offline"); };
+    const catalog = await f.library.catalog(0, { query: "repo-1" });
+    assert.equal(catalog.filteredTotal, 1);
+    assert.equal(catalog.repositories[0].state, "unavailable");
+    assert.equal(catalog.repositories[0].path, f.paths[1]);
+    assert.match(catalog.repositories[0].error!, /offline/);
+    assert.equal(catalog.repositories[0].workspaceId, null);
+  } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
 test("forged workspace selection is rejected before native search", async () => {
   const f = await fixture();
   try {
