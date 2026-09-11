@@ -1,7 +1,7 @@
 # Gortex for Paseo
 
 A trusted local Paseo plugin for browsing the connected host's native Gortex
-workspaces, checking daemon and repository health, inspecting code, and editing
+workspaces, checking daemon and host index health, inspecting code, and editing
 repository metadata and exclusions.
 
 ## Current features
@@ -9,7 +9,9 @@ repository metadata and exclusions.
 - Host-scoped workspace and repository catalog using Gortex's native identities.
 - Daemon health, uptime, graph counts, memory, MCP sessions, and language-server
   state. Health refreshes every 30 seconds while the panel is active.
-- On-demand reported token savings and repository index health.
+- On-demand reported token savings and **host index health**. The native
+  `workspace.index` report covers every repository and workspace on that daemon;
+  its file/node/relationship totals and score are not per-repository statistics.
 - Repository-scoped symbol search with bounded results, readable source with line
   numbers, and navigable callers, dependencies, usages, implementations, and impact.
   Native reports remain available for inspection; displayed context can be copied.
@@ -87,10 +89,19 @@ configured plugins too. Confirm the Gortex plugin reports a running state. Use
 Paseo's supported configuration reload when needed; do not restart the shared Paseo
 daemon just to load this plugin.
 
-From Personal, connect to CNS in Paseo, open **Gortex**, and select CNS in the host
-selector. The catalog, health, source queries, and metadata actions then use CNS's
-Gortex installation. Keep CNS's existing Gortex configuration and repositories;
-there is no need to copy Personal's tracking configuration or database.
+From Personal, connect to CNS in Paseo, open **Gortex**, and select CNS in the
+**plugin host selector in the Gortex screen header**. Both installations should use
+ID `gortex` and be running. Paseo groups the matching sidebar contributions and
+supplies the selected host's bundle, RPC connection, and query cache. The subtitle
+`Native code intelligence on ...` should change to CNS, along with its catalog.
+Switching the general app host while leaving a host-specific plugin screen open is
+not a substitute for selecting that screen's host.
+
+If the subtitle changes to CNS but Personal's repositories remain, check the CNS
+connection target and both plugin/client versions; that is not expected host
+isolation. Repository metadata actions should always use the selected host's
+installation. Keep CNS's existing Gortex configuration and repositories; there is
+no need to copy Personal's tracking configuration or database.
 
 **Browse... opens on CNS's Windows desktop**, not Personal's. Use Remote Desktop
 when you need to interact with that dialog. Health, search, and settings remain
@@ -118,9 +129,13 @@ npm test
 
 The Node test runner covers adapters, response validation, host/selection isolation,
 directory and picker handling, request sharing, symbol inspection, and metadata jobs.
-The current suite has 71 passing tests. Separate isolated native integration
+The current suite has 72 passing tests. Separate isolated native integration
 exercises verified metadata repair, exclusion removal/reinclusion, and isolation of
-a second repository. Live read-only checks verified the six inspector operations.
+a second repository. The index scope fixture uses three repositories across two
+workspaces and verifies that the shared native index report includes all three.
+Run it explicitly with `node --experimental-strip-types server/index-native-fixture.ts`.
+It uses its own temporary config, store, socket, and daemon, then cleans them up.
+Live read-only checks verified the six inspector operations.
 These checks do not replace desktop/mobile UI testing.
 
 See [server/metadata-contracts.md](server/metadata-contracts.md) for the current

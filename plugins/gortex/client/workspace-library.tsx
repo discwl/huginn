@@ -80,7 +80,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
             <Notice theme={theme} text={`Active graph: ${repository!.graphName} · Workspace: ${context.workspaceId} · Project: ${repository!.projectId || "not set"}`} />
             {repository!.name !== repository!.graphName && <Notice theme={theme} text="The configured name differs from the active graph. Repository settings shows both values; queries use the active identity above." />}
             <View style={{ flexDirection: "row", flexWrap: "wrap", alignSelf: "flex-start", gap: 5, padding: 4, borderRadius: 12, backgroundColor: theme.colors.surface0 }}>
-              <Action title="Overview" icon="LayoutDashboard" theme={theme} selected={tab === "overview"} onPress={() => setTab("overview")} />
+              <Action title="Host index" icon="LayoutDashboard" theme={theme} selected={tab === "overview"} onPress={() => setTab("overview")} />
               <Action title="Search & inspect" icon="Search" theme={theme} selected={tab === "search"} onPress={() => setTab("search")} />
             </View>
             {openError && <Notice theme={theme} error text={openError} />}
@@ -92,7 +92,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
             <View style={{ alignItems: "center", justifyContent: "center", gap: 14, paddingVertical: 48, paddingHorizontal: 16 }}>
               <View style={{ padding: 16, borderRadius: 18, backgroundColor: theme.colors.surface2 }}><Icon name="FolderSearch" size={30} color={theme.colors.accent} /></View>
               <Text style={{ color: theme.colors.foreground, fontSize: 20, fontWeight: "600", textAlign: "center" }}>Explore your codebase</Text>
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 21, maxWidth: 360, textAlign: "center" }}>Choose a workspace and repository to inspect its index, search symbols, and follow code relationships.</Text>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 21, maxWidth: 360, textAlign: "center" }}>Choose a workspace and repository to search symbols and follow code relationships. Host index health is shared across all repositories.</Text>
             </View>
           </Card>}
         </View>
