@@ -75,7 +75,45 @@ Plugin backend code is unsandboxed and can access that host's files, processes,
 credentials, and network; client code runs inside Paseo. Review the source before
 trusting it. Do not put credentials in plugin settings.
 
-On the target Windows host, with Git, Node/npm, Paseo, and Gortex already installed:
+### Install directly from GitHub
+
+On the target host, with Git, Node.js/npm, Paseo 0.8, and Gortex already installed:
+
+```powershell
+paseo plugin add discwl/huginn:plugins/gortex --ref main
+paseo plugin ls gortex
+```
+
+Paseo downloads and manages the checkout on that host. The manifest's preparation
+step installs the locked dependencies and typechecks the plugin before activation.
+You do not need to clone the repository or run npm commands yourself.
+
+To manage another daemon from your current machine, provide its actual connection
+address. For example, replace the SSH username and address below with your own:
+
+```powershell
+paseo --host "ssh://YOUR_USER@XENDEE_ADDRESS" plugin add discwl/huginn:plugins/gortex --ref main
+```
+
+The target daemon performs the Git fetch and installation. Its operating-system
+account must have access to the repository and dependency registry. A Paseo display
+label such as `Xendee` is not itself an SSH address. Use the target machine's terminal
+if your connection is available only through the Paseo app.
+
+For later updates to a Git-managed installation, run this on the same host, or use
+the same explicit `--host` connection:
+
+```powershell
+paseo plugin update gortex
+```
+
+See the [Paseo plugin reference](https://paseo.sh/docs/plugins/v0.8/reference#cli-reference)
+for Git sources, tracked branches, pinned revisions, and installation effects.
+
+### Install a development checkout
+
+Use a directory installation when you want Paseo to run files you edit locally.
+On the target Windows host:
 
 ```powershell
 git clone --branch main https://github.com/discwl/huginn.git C:\GortexKit
