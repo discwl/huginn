@@ -2,9 +2,19 @@
 export const WINDOWS_PICKER_PROBE = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-Add-Type -AssemblyName System.Windows.Forms
-$available = [Environment]::UserInteractive -and ((Get-Process -Id $PID).SessionId -gt 0) -and ($null -ne [System.Windows.Forms.FolderBrowserDialog].GetProperty('AutoUpgradeEnabled'))
-@{ available = $available } | ConvertTo-Json -Compress
+$status = 'ready'
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+  $status = 'powershell_version'
+} else {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    foreach ($property in @('AutoUpgradeEnabled', 'UseDescriptionForTitle', 'InitialDirectory')) {
+      if ($null -eq [System.Windows.Forms.FolderBrowserDialog].GetProperty($property)) { $status = 'windows_forms' }
+    }
+  } catch { $status = 'windows_forms' }
+  if ($status -eq 'ready' -and (-not [Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0)) { $status = 'desktop' }
+}
+@{ status = $status } | ConvertTo-Json -Compress
 `;
 
 export const WINDOWS_PICKER_SCRIPT = String.raw`
