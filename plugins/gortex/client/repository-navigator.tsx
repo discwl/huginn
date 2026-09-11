@@ -16,14 +16,15 @@ type Props = {
   onFilters: (filters: CatalogFilters) => void;
   onRepository: (repository: Repository) => void;
   onMetadata: (repository: Repository) => void;
+  onUntrack: (repository: Repository) => void;
   onPage: (offset: number) => void;
 };
 const pageSize = 12;
 export const repositoryPageSize = pageSize;
 const label = (value: string) => value || "Not set";
 
-function RepositoryRow({ theme, repository, compact, onOpen, onSettings }: { theme: Props["theme"]; repository: Repository; compact: boolean; onOpen: () => void; onSettings: () => void }) {
-  const [focused, setFocused] = useState<"row" | "settings" | null>(null);
+function RepositoryRow({ theme, repository, compact, onOpen, onSettings, onUntrack }: { theme: Props["theme"]; repository: Repository; compact: boolean; onOpen: () => void; onSettings: () => void; onUntrack: () => void }) {
+  const [focused, setFocused] = useState<"row" | "settings" | "untrack" | null>(null);
   const available = repository.state === "resolved";
   return <View style={{ flexDirection: "row", alignItems: "center", borderTopWidth: 1, borderColor: theme.colors.border, minWidth: 0 }}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${available ? "Explore" : "View settings for"} ${repository.name}, ${repository.path}, workspace ${label(repository.declaredWorkspace)}`} onPress={available ? onOpen : onSettings} onFocus={() => setFocused("row")} onBlur={() => setFocused(null)} style={({ pressed }) => ({ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12, minHeight: compact ? 94 : 76, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: focused === "row" ? theme.colors.accent : "transparent", backgroundColor: pressed || focused === "row" ? theme.colors.surface2 : theme.colors.surface1 })}>
@@ -42,10 +43,11 @@ function RepositoryRow({ theme, repository, compact, onOpen, onSettings }: { the
       <Icon name="ChevronRight" size={16} color={theme.colors.foregroundMuted} />
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={`Repository settings for ${repository.name}, ${repository.path}`} onPress={onSettings} onFocus={() => setFocused("settings")} onBlur={() => setFocused(null)} style={({ pressed }) => ({ width: 44, height: 44, marginRight: 6, alignItems: "center", justifyContent: "center", borderRadius: 8, borderWidth: 1, borderColor: focused === "settings" ? theme.colors.accent : "transparent", backgroundColor: pressed ? theme.colors.surface2 : theme.colors.surface1 })}><Icon name="Settings2" size={17} color={theme.colors.foregroundMuted} /></Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={`Untrack ${repository.name}, ${repository.path}`} accessibilityHint="Opens a confirmation explaining what Gortex will remove. Source files are kept." onPress={onUntrack} onFocus={() => setFocused("untrack")} onBlur={() => setFocused(null)} style={({ pressed }) => ({ width: 44, height: 44, marginRight: 6, alignItems: "center", justifyContent: "center", borderRadius: 8, borderWidth: 1, borderColor: focused === "untrack" ? theme.colors.statusDanger : "transparent", backgroundColor: pressed || focused === "untrack" ? theme.colors.surface2 : theme.colors.surface1 })}><Icon name="Trash2" size={17} color={theme.colors.statusDanger} /></Pressable>
   </View>;
 }
 
-export function RepositoryNavigator({ theme, compact, catalog, filters, loading, error, onFilters, onRepository, onMetadata, onPage }: Props) {
+export function RepositoryNavigator({ theme, compact, catalog, filters, loading, error, onFilters, onRepository, onMetadata, onUntrack, onPage }: Props) {
   const [focused, setFocused] = useState(false);
   const [menu, setMenu] = useState<"workspace" | "project" | "sort" | null>(null);
   const [optionQuery, setOptionQuery] = useState("");
@@ -90,10 +92,10 @@ export function RepositoryNavigator({ theme, compact, catalog, filters, loading,
     {filtered && <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 }}><Notice theme={theme} text={error ? "Results unavailable" : loading ? "Finding matching repositories…" : `${catalog?.filteredTotal ?? 0} matching repositories`} /><Action theme={theme} title="Clear filters" icon="X" onPress={() => { onFilters({ ...emptyCatalogFilters, sort: filters.sort }); setMenu(null); }} /></View>}
     {error ? <Notice theme={theme} error text={`Repository catalog unavailable: ${error.message}`} /> : loading ? <View style={{ paddingVertical: 32, alignItems: "center", gap: 10 }}><Icon name="Database" size={24} color={theme.colors.foregroundMuted} /><Notice theme={theme} text="Loading repositories from the selected host…" /></View> : catalog && <>
       {catalog.repositories.length > 0 ? <View style={{ minWidth: 0 }}>
-        {!compact && <View style={{ flexDirection: "row", gap: 12, paddingHorizontal: 12, paddingBottom: 10, paddingRight: 90 }}>
+        {!compact && <View style={{ flexDirection: "row", gap: 12, paddingHorizontal: 12, paddingBottom: 10, paddingRight: 140 }}>
           {[{ title: "REPOSITORY", flex: 1 }, { title: "WORKSPACE", width: 150 }, { title: "PROJECT", width: 130 }, { title: "CODE ACCESS", width: 115 }].map(column => <Text key={column.title} style={{ flex: column.flex, width: column.width, color: theme.colors.foregroundMuted, fontSize: 10, fontWeight: "600", letterSpacing: 1 }}>{column.title}</Text>)}
         </View>}
-        {catalog.repositories.map(repository => <RepositoryRow key={repository.path} theme={theme} repository={repository} compact={compact} onOpen={() => onRepository(repository)} onSettings={() => onMetadata(repository)} />)}
+        {catalog.repositories.map(repository => <RepositoryRow key={repository.path} theme={theme} repository={repository} compact={compact} onOpen={() => onRepository(repository)} onSettings={() => onMetadata(repository)} onUntrack={() => onUntrack(repository)} />)}
       </View> : <View style={{ alignItems: "center", paddingVertical: 36, gap: 12 }}><Icon name="FolderSearch" size={30} color={theme.colors.accent} /><Text style={{ color: theme.colors.foreground, fontSize: 17, fontWeight: "600" }}>{catalog.total === 0 ? "No tracked repositories yet" : "No repositories match your filters"}</Text><Notice theme={theme} text={catalog.total === 0 ? "Track a repository with Gortex on this host, then refresh the library." : "Try a different name or path, or clear the workspace and project filters."} /></View>}
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, paddingTop: 12, borderTopWidth: 1, borderColor: theme.colors.border }}>
         <Notice theme={theme} text={catalog.filteredTotal === 0 ? "0 repositories" : `${catalog.offset + 1}–${catalog.offset + catalog.repositories.length} of ${catalog.filteredTotal} ${filtered ? "matches" : "repositories"}`} />

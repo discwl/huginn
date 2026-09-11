@@ -128,6 +128,15 @@ export class GortexClient implements NativePort {
     return this.call(cwd, "relations", { operation, target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
   }
 
+  checkouts(cwd: string): Promise<{ value: unknown; meta: unknown }> {
+    return this.call(cwd, "workspace", { operation: "checkouts", arguments: { format: "json", max_bytes: 256000 } });
+  }
+
+  untrack(path: string, confirm: boolean): Promise<{ value: unknown; meta: unknown }> {
+    // MCP-only administration: no CLI config-only fallback if the daemon disconnects.
+    return this.call(path, "workspace_admin", { operation: "untrack", arguments: { path, confirm } }, 120000);
+  }
+
   async reloadConfiguration(): Promise<void> {
     await runProcess(this.binary, ["daemon", "reload"], homedir(), { timeoutMs: 60000, maxBytes: 16384 });
   }

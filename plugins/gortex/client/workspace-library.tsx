@@ -14,6 +14,8 @@ import { RepositoryOverview } from "./repository-overview.tsx";
 import { RepositoryMetadata } from "./repository-metadata.tsx";
 import { Action, Badge, Card, Notice, SectionHeading } from "./controls.tsx";
 
+import { RepositoryUntrackDialog } from "./repository-untrack-dialog.tsx";
+
 export function LibrarySurface(props: PluginSurfaceProps) { return <HostLibrary key={props.host.id} {...props} />; }
 
 function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
@@ -27,6 +29,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
   const [filters, setFilters] = useState<CatalogFilters>(emptyCatalogFilters);
   const [query, setQuery] = useState("");
   const [repository, setRepository] = useState<Repository | null>(null);
+  const [untrackRepository, setUntrackRepository] = useState<Repository | null>(null);
   const [repositoryChanged, setRepositoryChanged] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [tab, setTab] = useState<"search" | "settings">("search");
@@ -41,6 +44,10 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
     enabled: section === "repositories" && repository === null && queryCurrent,
     placeholderData: keepPreviousData, retry: false, staleTime: 0, refetchOnWindowFocus: false,
   });
+  useEffect(() => {
+    // Reconcile a clamped page after native cleanup removes the last row on a page.
+    if (!catalog.isFetching && !catalog.isPlaceholderData && !catalog.isError && queryCurrent && catalog.data && catalog.data.offset !== offset) setOffset(catalog.data.offset);
+  }, [catalog.isFetching, catalog.isPlaceholderData, catalog.isError, catalog.data, queryCurrent, offset]);
   // Host health has its own unfiltered context lookup; library filters must not hide or re-scope this report.
   const healthCatalog = useQuery({
     queryKey: [host.id, "gortex", "host-index-context-v2"],
@@ -89,7 +96,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
       <HostHealth host={host} theme={theme} compact={section !== "health"} onDetails={() => changeSection("health")} />
       {selectedFolder && <View style={{ gap: 8 }}><Action theme={theme} title="Close folder selection" icon="X" onPress={() => setSelectedFolder(null)} /><SelectedNativeFolder key={selectedFolder} host={host} theme={theme} path={selectedFolder} onOpen={navigation ? open : undefined} /></View>}
       <View style={{ display: section === "repositories" && !repository ? "flex" : "none", minWidth: 0 }}>
-        <RepositoryNavigator theme={theme} compact={compact} catalog={catalog.data} filters={filters} loading={catalog.isFetching || catalog.isPlaceholderData || !queryCurrent} error={queryCurrent ? catalog.error : null} onFilters={changeFilters} onRepository={repo => visit(repo, "search")} onMetadata={repo => visit(repo, "settings")} onPage={next => { setOffset(next); restoreScroll.current = 0; scroll.current?.scrollTo({ y: 0, animated: false }); }} />
+        <RepositoryNavigator theme={theme} compact={compact} catalog={catalog.data} filters={filters} loading={catalog.isFetching || catalog.isPlaceholderData || !queryCurrent} error={queryCurrent ? catalog.error : null} onFilters={changeFilters} onRepository={repo => visit(repo, "search")} onMetadata={repo => visit(repo, "settings")} onUntrack={setUntrackRepository} onPage={next => { setOffset(next); restoreScroll.current = 0; scroll.current?.scrollTo({ y: 0, animated: false }); }} />
       </View>
       {section === "repositories" && repository && <View style={{ gap: 14, minWidth: 0 }}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}><Action title="All repositories" icon="ArrowLeft" theme={theme} onPress={back} /><Icon name="ChevronRight" size={14} color={theme.colors.foregroundMuted} /><Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: 13 }}>{repository.name}</Text></View>
@@ -117,7 +124,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
         {healthCatalog.error && <Notice theme={theme} error text={`Host index connection unavailable: ${healthCatalog.error.message}`} />}
         {indexContext ? <RepositoryOverview theme={theme} report={status.data} loading={status.isFetching} error={status.error} onRefresh={() => { void status.refetch(); }} /> : !healthCatalog.isFetching && !healthCatalog.isError && <View style={{ gap: 12 }}><SectionHeading title="Host index health" icon="Database" theme={theme} /><Notice theme={theme} text="A reachable indexed repository is required to read this report. The catalog page did not provide one; daemon health remains available above." /><Action theme={theme} title="Retry index connection" icon="RefreshCw" onPress={() => { void healthCatalog.refetch(); }} /></View>}
       </Card>}
-      <Notice theme={theme} text="Preview · Tracking new repositories and exact checkout selection are still in development." />
+      {untrackRepository && <RepositoryUntrackDialog key={`${host.id}:${untrackRepository.path}`} host={host} theme={theme} name={untrackRepository.name} path={untrackRepository.path} onClose={() => setUntrackRepository(null)} onChanged={() => setRepositoryChanged(true)} />}
     </View>
   </ScrollView>;
 }

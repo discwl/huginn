@@ -2,7 +2,7 @@
 
 A trusted local Paseo plugin for browsing the connected host's native Gortex
 workspaces, checking daemon and host index health, inspecting code, and editing
-repository metadata and exclusions.
+repository metadata and exclusions, and explicitly untracking repositories.
 
 ## Current features
 
@@ -29,6 +29,11 @@ repository metadata and exclusions.
 - A **Resolve mismatch** action that previews supported metadata repairs before
   applying them. Writes use stale-preview checks, a configuration backup, native
   reload/index operations, and verification of the resulting daemon state.
+- **Repository settings → Repository tracking → Review untracking** removes explicit
+  tracking through the selected host's Gortex daemon after confirmation. It saves a
+  configuration backup, rechecks the preview, and displays the native outcome.
+  Primary graph/checkout removal requires a second confirmation of Gortex's exact
+  affected-view list. Source files and Paseo workspaces remain unchanged.
 - A Windows **Browse...** button that opens a native folder dialog on the selected
   host's desktop and inspects the chosen directory. It does not track a new repo.
 
@@ -39,8 +44,16 @@ explicit repository working directories.
 
 ## Current limits
 
-- Creating/tracking/untracking repositories and changing primary checkouts are not
-  exposed. Use native Gortex tooling on the host for those actions.
+- Creating/tracking repositories, deliberately forgetting worktrees, and changing
+  primary checkouts are not exposed. Use native Gortex tooling for those actions.
+- Ordinary automatic worktrees have no separate config entry to untrack. Untracking
+  a dedicated worktree can return it to automatic indexing while a primary survives;
+  it is not a permanent worktree exclusion. Missing paths and ambiguous or mismatched
+  graph names must be resolved on the host before using the untrack action.
+- Native untracking has no client-supplied plan-version guard. The plugin rechecks
+  config and catalog state, but other native administrators can still race that
+  check. Coordinate administration until the confirmed operation finishes. A lost
+  native response stays unverified and is never automatically replayed.
 - Searches use the selected repository's current native session context. Exact
   checkout selection and workspace-wide cross-repository search are not established.
 - Gortex 0.64.3 does not provide a supported in-place graph rename. A mismatch repair
@@ -56,7 +69,8 @@ explicit repository working directories.
 The installed integration was validated with Paseo `0.8.0-beta.1`, Gortex
 `0.64.3+56a1c29`, and Node `22.14.0`. The manifest accepts Paseo
 `>=0.8.0-beta.1 <0.9.0`. Read adapters require Gortex 0.64.2 or newer; metadata writes
-are gated to the verified 0.64.3 contract and are unavailable for unverified versions.
+and untracking are gated to the verified 0.64.3 contract and are unavailable for
+unverified versions.
 
 Gortex must be available on the Paseo daemon account's `PATH`, with its existing
 configuration and shared daemon accessible to that account. The Windows folder
@@ -217,6 +231,12 @@ workspaces and verifies that the shared native index report includes all three.
 Run it explicitly with `node --experimental-strip-types server/index-native-fixture.ts`.
 It uses its own temporary config, store, socket, and daemon, then cleans them up.
 Live read-only checks verified the six inspector operations.
+`node --experimental-strip-types server/untrack-native-fixture.ts` separately verifies
+native untracking, source preservation and repository isolation. On this Windows
+installation the native checkout-family catalog is empty, so the fixture explicitly
+skips native demotion/primary-closure cases; those response paths have unit coverage.
+See [server/untrack-contracts.md](server/untrack-contracts.md) for confirmation behavior,
+precondition limits and proposed panel/command additions.
 These checks do not replace desktop/mobile UI testing.
 
 See [server/metadata-contracts.md](server/metadata-contracts.md) for the current
