@@ -5,6 +5,7 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { metadataReadRpc, metadataPreviewRpc, metadataRepairRpc, metadataApplyRpc, metadataJobRpc, type MetadataPreview, type RepositoryFields } from "../shared/metadata-contracts.ts";
 import { metadataRepairState } from "../shared/metadata-repair.ts";
 import { MetadataChangePreview } from "./metadata-preview.tsx";
+import { RepositoryUntrack } from "./repository-untrack.tsx";
 import { parseExclusionLines } from "../shared/exclusions.ts";
 import { ExclusionEditor, ExclusionSettings } from "./repository-exclusions.tsx";
 import { Action, Badge, Card, Disclosure, Notice, SectionHeading } from "./controls.tsx";
@@ -28,12 +29,13 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [untracking, setUntracking] = useState(false);
   const [extraOpen, setExtraOpen] = useState(false);
   const requestInProgress = useRef(false);
   const processed = useRef<string | null>(null);
   const job = useQuery({ queryKey: [host.id, "gortex", "metadata-job", jobId], queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => query.state.error ? false : query.state.data?.stage === "done" ? false : 1000 });
   const running = jobId !== null && (!job.data || job.data.stage !== "done");
-  const locked = busy || running;
+  const locked = busy || running || untracking;
   function stopEditing() { setEditing(false); setRepairing(false); setDraft(null); setExclusionDraft(null); setPreview(null); }
   useEffect(() => {
     if (!job.data || job.data.stage !== "done" || processed.current === job.data.id) return;
@@ -130,5 +132,6 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
       </>}
     </View>}
     <Action title="Refresh metadata" icon="RefreshCw" theme={theme} disabled={locked || editing || data.isFetching} onPress={() => { setRepairing(false); setPreview(null); void data.refetch(); }} />
+    <RepositoryUntrack host={host} theme={theme} path={path} disabled={busy || running || editing || preview !== null} onBusy={setUntracking} onChanged={onChanged} />
   </Card>;
 }

@@ -5,6 +5,7 @@ import type { MetadataJob, MetadataPreview, RepositoryFields, RepositoryMetadata
 import type { NativePort } from "./gortex-client.ts";
 import { RepositoryConfig, sameRepositoryPath, type ConfigSnapshot } from "./repository-config.ts";
 import { metadataRepairState } from "../shared/metadata-repair.ts";
+import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 
 export interface MetadataPort extends Pick<NativePort, "assignments" | "info" | "version"> {
   reloadConfiguration(): Promise<void>;
@@ -23,8 +24,9 @@ export class RepositoryMetadata {
   private jobs = new Map<string, MetadataJob>();
   private running: Promise<void> | null = null;
   private closed = false;
-  constructor(native: MetadataPort, config = new RepositoryConfig(), invalidate: () => void = () => {}) {
-    this.native = native; this.config = config; this.invalidate = invalidate;
+  private admin: RepositoryAdminLock;
+  constructor(native: MetadataPort, config = new RepositoryConfig(), invalidate: () => void = () => {}, admin = new RepositoryAdminLock()) {
+    this.native = native; this.config = config; this.invalidate = invalidate; this.admin = admin;
   }
 
   private async snapshot(path: string): Promise<{ config: ConfigSnapshot; metadata: Metadata }> {
@@ -123,11 +125,12 @@ export class RepositoryMetadata {
     if (record.job) return this.job(record.job);
     if (Date.parse(record.public.expiresAt) < Date.now()) throw new Error("Preview expired. Create a new preview.");
     if (this.running) throw new Error("Another repository configuration change is in progress on this host. Wait for it to finish.");
+    const release = this.admin.acquire();
     const job: MetadataJob = { id: randomUUID(), path: record.snapshot.path, stage: "validating", outcome: "running", exclusions: record.public.updatesExclusions ? "pending" : "unchanged", configSaved: false, backupPath: null, result: null, error: null };
     record.job = job.id;
     this.jobs.set(job.id, job);
     while (this.jobs.size > 40) this.jobs.delete(this.jobs.keys().next().value!);
-    this.running = this.execute(record, job).finally(() => { this.running = null; });
+    this.running = this.execute(record, job).finally(() => { this.running = null; release(); });
     return { ...job };
   }
 

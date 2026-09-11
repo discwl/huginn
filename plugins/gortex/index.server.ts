@@ -10,6 +10,9 @@ import { DirectoryBrowser } from "./server/directory-browser.ts";
 import { GortexClient } from "./server/gortex-client.ts";
 import { WorkspaceLibrary } from "./server/workspace-library.ts";
 import { RepositoryMetadata } from "./server/repository-metadata.ts";
+import { RepositoryAdminLock } from "./server/repository-admin-lock.ts";
+import { RepositoryUntrack } from "./server/repository-untrack.ts";
+import { untrackPreviewRpc, untrackApplyRpc, untrackJobRpc } from "./shared/untrack-contracts.ts";
 import { metadataReadRpc, metadataPreviewRpc, metadataRepairRpc, metadataApplyRpc, metadataJobRpc } from "./shared/metadata-contracts.ts";
 
 export default function contribute(server: PluginServerContext) {
@@ -30,11 +33,16 @@ export default function contribute(server: PluginServerContext) {
   server.handle(statusRpc, input => library.status(input));
   server.handle(searchRpc, input => library.search(input));
   server.handle(symbolRpc, input => library.symbol(input));
-  const metadata = new RepositoryMetadata(native, undefined, () => library.close());
+  const admin = new RepositoryAdminLock();
+  const metadata = new RepositoryMetadata(native, undefined, () => library.close(), admin);
+  const untrack = new RepositoryUntrack(native, undefined, () => library.close(), admin);
+  server.handle(untrackPreviewRpc, ({ path }) => untrack.preview(path));
+  server.handle(untrackApplyRpc, ({ id }) => untrack.apply(id));
+  server.handle(untrackJobRpc, ({ id }) => untrack.job(id));
   server.handle(metadataReadRpc, ({ path }) => metadata.read(path));
   server.handle(metadataPreviewRpc, ({ path, revision, configured, exclude }) => metadata.preview(path, revision, configured, exclude));
   server.handle(metadataRepairRpc, ({ path, revision }) => metadata.previewRepair(path, revision));
   server.handle(metadataApplyRpc, ({ id }) => metadata.apply(id));
   server.handle(metadataJobRpc, ({ id }) => metadata.job(id));
-  return async () => { directories.close(); nativePicker.close(); await metadata.close(); library.close(); await native.close(); };
+  return async () => { directories.close(); nativePicker.close(); await Promise.all([metadata.close(), untrack.close()]); library.close(); await native.close(); };
 }
