@@ -110,6 +110,21 @@ paseo plugin update gortex
 See the [Paseo plugin reference](https://paseo.sh/docs/plugins/v0.8/reference#cli-reference)
 for Git sources, tracked branches, pinned revisions, and installation effects.
 
+### Switch an existing directory installation to Git
+
+Paseo rejects `plugin add` when the same runtime ID is already configured. Record
+any custom plugin preferences, then run this once on that host:
+
+```powershell
+paseo plugin remove gortex
+paseo plugin add discwl/huginn:plugins/gortex --ref main
+```
+
+Removing a directory installation keeps its source directory, but clears Paseo's
+saved settings for that plugin ID. Gortex's native configuration, repositories,
+and indexes remain intact. Reapply any custom plugin preferences after installing.
+For subsequent Git-managed updates, use `paseo plugin update gortex`.
+
 ### Install a development checkout
 
 Use a directory installation when you want Paseo to run files you edit locally.
