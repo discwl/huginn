@@ -24,6 +24,7 @@ export class GortexClient implements NativePort {
   private binary: string;
   private connections = new Map<string, Connection>();
   private closed = false;
+  private updating = false;
   private admission: Promise<void> = Promise.resolve();
   constructor(binary = "gortex") { this.binary = binary; }
 
@@ -47,6 +48,7 @@ export class GortexClient implements NativePort {
     await prior;
     try {
       if (this.closed) throw new NativeError("closed", "Gortex plugin connection is closed.");
+      if (this.updating) throw new NativeError("updating", "Gortex is updating on this host. Refresh after the update completes.");
       let connection = this.connections.get(key);
       if (!connection) {
         if (this.connections.size >= 4) {
@@ -57,6 +59,7 @@ export class GortexClient implements NativePort {
         }
         const executable = await resolveHostExecutable(this.binary);
         if (this.closed) throw new NativeError("closed", "Gortex plugin connection is closed.");
+      if (this.updating) throw new NativeError("updating", "Gortex is updating on this host. Refresh after the update completes.");
         const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
         // Other documented presets select legacy names. Compact supplies the effect-split facade.
         env.GORTEX_TOOLS = "compact";
@@ -154,6 +157,16 @@ export class GortexClient implements NativePort {
     const result = await this.call(path, "workspace_admin", { operation: "index", arguments: { path } }, 120000);
     const receipt = z.object({ node_count: z.number().int().nonnegative(), edge_count: z.number().int().nonnegative(), file_count: z.number().int().nonnegative() }).safeParse(result.value);
     if (!receipt.success) throw new NativeError("index_shape", "Gortex did not return a supported index receipt. Reconcile the daemon before retrying.");
+  }
+
+  async withMaintenance<T>(effect: () => Promise<T>): Promise<T> {
+    if (this.closed) throw new NativeError("closed", "Gortex plugin connection is closed.");
+    if (this.updating) throw new NativeError("updating", "Gortex is already updating on this host.");
+    this.updating = true;
+    try {
+      await this.refreshContexts();
+      return await effect();
+    } finally { this.updating = false; }
   }
 
   async refreshContexts(): Promise<void> {

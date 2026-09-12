@@ -51,6 +51,35 @@ presentation and query settings, not a separate repository registry. Connections
 use a small persistent pool of `gortex mcp --proxy --tools compact` processes with
 explicit repository working directories.
 
+## Gortex updates
+
+**Host health → Gortex updates → Check for updates** compares the binary on the
+selected host with Gortex's official stable GitHub release. It does not download
+an executable or change the daemon. When a newer release is available, **Update**
+opens a host-specific preview and **Confirm update** starts a background job.
+
+The standard Windows x64 installation under `%LOCALAPPDATA%\Programs\gortex`
+uses the official release archive, requires its SHA-256 checksum, extracts only
+`gortex.exe`, verifies its version, and retains the previous executable beside it.
+A previously reachable daemon is restarted with Gortex's supported command. This
+requires Windows PowerShell, but no interactive desktop or PowerShell 7 folder picker.
+Other verified installation methods use the native `gortex upgrade --run --no-migrate`
+command; unknown methods show an unsupported state. Package managers can install a
+newer release than the preview if that is the version they currently distribute.
+
+Updates affect every Gortex client on that host and can briefly interrupt queries.
+They do not request tracking changes, index rebuilds, enrichment, or agent configuration
+migration. A restart can apply already-saved Gortex configuration. The result verifies
+the installed binary version and daemon reachability; it does not infer the running
+daemon's build from an MCP proxy version. Failed or uncertain operations require
+reconciliation and are never automatically replayed. Keep the plugin running until
+the job finishes; closing just the panel is fine. Backups are retained, not automatically
+restored after a daemon restart, because the new release may migrate native storage.
+
+Updating Gortex may make version-gated plugin features unavailable until their
+contracts are verified. Updating this plugin itself remains a separate Paseo action:
+`paseo plugin update gortex` for GitHub installations.
+
 ## Current limits
 
 - Creating source repositories, deliberately forgetting worktrees, and changing
@@ -84,7 +113,7 @@ explicit repository working directories.
 
 The installed integration was validated with Paseo `0.8.0-beta.1`, Gortex
 `0.64.3+56a1c29`, and Node `22.14.0`. The manifest accepts Paseo
-`>=0.8.0-beta.1 <0.9.0`. Read adapters require Gortex 0.64.2 or newer; metadata writes
+`>=0.8.0-beta.1 <0.9.0`. Read adapters accept compatible Gortex 0.64.x patches starting at 0.64.2; metadata writes
 and tracking/untracking are gated to the verified 0.64.3 contract and are unavailable for
 unverified versions.
 
