@@ -2,10 +2,11 @@ import { spawn } from "node:child_process";
 import { NativeError } from "./native-response.ts";
 import { resolveHostExecutable } from "./host-executable.ts";
 
-export async function runProcess(command: string, args: readonly string[], cwd: string, options: { timeoutMs?: number; maxBytes?: number } = {}): Promise<string> {
-  const executable = await resolveHostExecutable(command);
+export async function runProcess(command: string, args: readonly string[], cwd: string, options: { timeoutMs?: number; maxBytes?: number; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
+  const env = options.env ?? process.env;
+  const executable = await resolveHostExecutable(command, env);
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, [...args], { cwd, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(executable, [...args], { cwd, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let bytes = 0;
     let settled = false;
