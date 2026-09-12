@@ -5,6 +5,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { Catalog, Repository } from "../shared/models.ts";
 import { emptyCatalogFilters, type CatalogFilters } from "../shared/catalog-browser.ts";
 import { Action, Badge, Card, Notice, SectionHeading } from "./controls.tsx";
+import { PaseoProjectRow } from "./paseo-project-row.tsx";
 
 type Props = {
   theme: PluginSurfaceProps["theme"];
@@ -17,6 +18,7 @@ type Props = {
   onRepository: (repository: Repository) => void;
   onMetadata: (repository: Repository) => void;
   onUntrack: (repository: Repository) => void;
+  onIndex: (repository: Repository) => void;
   onPage: (offset: number) => void;
 };
 const pageSize = 12;
@@ -47,7 +49,7 @@ function RepositoryRow({ theme, repository, compact, onOpen, onSettings, onUntra
   </View>;
 }
 
-export function RepositoryNavigator({ theme, compact, catalog, filters, loading, error, onFilters, onRepository, onMetadata, onUntrack, onPage }: Props) {
+export function RepositoryNavigator({ theme, compact, catalog, filters, loading, error, onFilters, onRepository, onMetadata, onUntrack, onIndex, onPage }: Props) {
   const [focused, setFocused] = useState(false);
   const [menu, setMenu] = useState<"workspace" | "project" | "sort" | null>(null);
   const [optionQuery, setOptionQuery] = useState("");
@@ -66,7 +68,7 @@ export function RepositoryNavigator({ theme, compact, catalog, filters, loading,
   }
   return <Card theme={theme}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-      <SectionHeading theme={theme} title="Repositories" subtitle="Find a codebase, inspect its symbols, or manage its settings." icon="Library" />
+      <SectionHeading theme={theme} title="Repositories" subtitle="Gortex repositories and Paseo projects on this host." icon="Library" />
       {catalog && <Badge theme={theme} label={`${catalog.total} ${catalog.total === 1 ? "repository" : "repositories"} · ${catalog.workspaces.length} ${catalog.workspaces.length === 1 ? "workspace" : "workspaces"}`} />}
     </View>
     <View style={{ flexDirection: compact ? "column" : "row", gap: 10, alignItems: compact ? "stretch" : "center" }}>
@@ -95,8 +97,8 @@ export function RepositoryNavigator({ theme, compact, catalog, filters, loading,
         {!compact && <View style={{ flexDirection: "row", gap: 12, paddingHorizontal: 12, paddingBottom: 10, paddingRight: 140 }}>
           {[{ title: "REPOSITORY", flex: 1 }, { title: "WORKSPACE", width: 150 }, { title: "PROJECT", width: 130 }, { title: "CODE ACCESS", width: 115 }].map(column => <Text key={column.title} style={{ flex: column.flex, width: column.width, color: theme.colors.foregroundMuted, fontSize: 10, fontWeight: "600", letterSpacing: 1 }}>{column.title}</Text>)}
         </View>}
-        {catalog.repositories.map(repository => <RepositoryRow key={repository.path} theme={theme} repository={repository} compact={compact} onOpen={() => onRepository(repository)} onSettings={() => onMetadata(repository)} onUntrack={() => onUntrack(repository)} />)}
-      </View> : <View style={{ alignItems: "center", paddingVertical: 36, gap: 12 }}><Icon name="FolderSearch" size={30} color={theme.colors.accent} /><Text style={{ color: theme.colors.foreground, fontSize: 17, fontWeight: "600" }}>{catalog.total === 0 ? "No tracked repositories yet" : "No repositories match your filters"}</Text><Notice theme={theme} text={catalog.total === 0 ? "Track a repository with Gortex on this host, then refresh the library." : "Try a different name or path, or clear the workspace and project filters."} /></View>}
+        {catalog.repositories.map(repository => repository.origin === "paseo" ? <PaseoProjectRow key={repository.path} theme={theme} repository={repository} compact={compact} trackingAvailable={catalog.administration.available} onIndex={() => onIndex(repository)} /> : <RepositoryRow key={repository.path} theme={theme} repository={repository} compact={compact} onOpen={() => onRepository(repository)} onSettings={() => onMetadata(repository)} onUntrack={() => onUntrack(repository)} />)}
+      </View> : <View style={{ alignItems: "center", paddingVertical: 36, gap: 12 }}><Icon name="FolderSearch" size={30} color={theme.colors.accent} /><Text style={{ color: theme.colors.foreground, fontSize: 17, fontWeight: "600" }}>{catalog.total === 0 ? "No repositories or Paseo projects yet" : "No repositories match your filters"}</Text><Notice theme={theme} text={catalog.total === 0 ? "Add or open a project in Paseo on this host, then refresh the library." : "Try a different name or path, or clear the workspace and project filters."} /></View>}
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, paddingTop: 12, borderTopWidth: 1, borderColor: theme.colors.border }}>
         <Notice theme={theme} text={catalog.filteredTotal === 0 ? "0 repositories" : `${catalog.offset + 1}–${catalog.offset + catalog.repositories.length} of ${catalog.filteredTotal} ${filtered ? "matches" : "repositories"}`} />
         {(catalog.offset > 0 || catalog.nextOffset !== null) && <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>

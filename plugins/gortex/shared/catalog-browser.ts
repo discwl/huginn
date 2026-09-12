@@ -1,7 +1,25 @@
 import { z } from "zod";
 import type { NativeAssignment } from "./models.ts";
 
+export const paseoProjectSchema = z.object({
+  id: z.string().min(1).max(500), name: z.string().min(1).max(500),
+  path: z.string().min(1).max(32767).refine(value => !value.includes("\0"), "Paths cannot contain NUL"),
+});
+export type PaseoProject = z.infer<typeof paseoProjectSchema>;
+const paseoProjectListSchema = z.object({
+  projects: z.array(z.object({ projectId: z.string().min(1), projectDisplayName: z.string(), projectRootPath: z.string().min(1) })),
+  error: z.unknown().optional(),
+});
+export function decodePaseoProjects(value: unknown): { projects: PaseoProject[]; partial: boolean } {
+  const result = paseoProjectListSchema.safeParse(value);
+  if (!result.success || result.data.error) throw new Error("Paseo returned an unsupported project catalog. Update Paseo on the selected host and refresh.");
+  return { projects: result.data.projects.slice(0, 500).map(project => paseoProjectSchema.parse({
+    id: project.projectId, name: project.projectDisplayName || project.projectRootPath, path: project.projectRootPath,
+  })), partial: result.data.projects.length > 500 };
+}
+
 export const catalogInputSchema = z.object({
+  paseoProjects: z.array(paseoProjectSchema).max(500).default([]),
   offset: z.number().int().min(0).max(100000).default(0),
   limit: z.number().int().min(1).max(50).default(50),
   query: z.string().trim().max(200).default(""),
@@ -39,6 +57,8 @@ export function pageAssignments(rows: NativeAssignment[], input: CatalogInput) {
     rows: matched.slice(offset, offset + input.limit), offset,
     total: rows.length, filteredTotal: matched.length,
     nextOffset: offset + input.limit < matched.length ? offset + input.limit : null,
-    workspaces: facets(rows, "workspace"), projects: facets(rows, "project"),
+    // Paseo candidates have no native membership. They must not create workspace/project facets.
+    workspaces: facets(rows.filter(row => row.source !== "paseo-project"), "workspace"),
+    projects: facets(rows.filter(row => row.source !== "paseo-project"), "project"),
   };
 }

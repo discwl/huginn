@@ -6,11 +6,12 @@ import type { NativePort } from "./gortex-client.ts";
 import { NativeError } from "./native-response.ts";
 import { runProcess } from "./process-runner.ts";
 import { QueryCache } from "./query-cache.ts";
+import { ProjectCatalog, repositoryPathKey } from "./project-catalog.ts";
 import { fitInspection, normalizeInspection } from "./symbol-inspection.ts";
 import type { InspectorOperation, SymbolSnapshot } from "../shared/symbol-inspection.ts";
 import { catalogInputSchema, pageAssignments, type CatalogInput } from "../shared/catalog-browser.ts";
 
-const administrationReason = "Tracking new repositories is not available in this preview. Edit workspace, project and name for existing repositories from Repository settings.";
+const administrationReason = "New standalone Git repositories can be indexed after confirmation on supported Gortex hosts. Existing repository metadata is managed in Repository settings.";
 const searchResultSchema = z.object({ results: z.array(symbolSchema).max(50), total: z.number().optional(), next_cursor: z.string().optional().nullable(), truncated: z.boolean().optional(), fetch_escalated: z.boolean().optional() }).passthrough();
 function samePath(a: string, b: string): boolean { return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b; }
 function message(error: unknown): string { return error instanceof Error ? error.message : "Host operation failed."; }
@@ -18,6 +19,7 @@ function message(error: unknown): string { return error instanceof Error ? error
 export class WorkspaceLibrary {
   private native: NativePort;
   private cache = new QueryCache();
+  private projects = new ProjectCatalog();
   // Tokens originate in native search or verified relationship results. A client cannot turn symbol RPC into an arbitrary file reader.
   private selectedSymbols = new Map<string, number>();
   constructor(native: NativePort) { this.native = native; }
@@ -41,14 +43,15 @@ export class WorkspaceLibrary {
   async catalog(offset = 0, options: Partial<CatalogInput> = {}): Promise<Catalog> {
     const input = catalogInputSchema.parse({ ...options, offset });
     const [version, rows] = await Promise.all([this.native.version(), this.native.assignments()]);
-    const { rows: visibleRows, ...page } = pageAssignments(rows, input);
+    const merged = await this.projects.merge(rows, input.paseoProjects);
+    const { rows: visibleRows, ...page } = pageAssignments(merged.rows, input);
     const repositories: Repository[] = [];
-    for (const row of visibleRows) repositories.push(await this.resolve(row));
+    for (const row of visibleRows) repositories.push(merged.candidates.get(repositoryPathKey(row.path)) ?? await this.resolve(row));
     return {
       version, repositories, ...page,
       observedAt: new Date().toISOString(),
       warnings: ["Membership is the observed native session context. Index state is queried separately on demand.", "Exact checkout selection is unavailable until the native checkout/view contract is verified."],
-      administration: { available: false, reason: administrationReason },
+      administration: { available: /^gortex v0\.64\.3(?:\+|$)/.test(version), reason: administrationReason },
     };
   }
 
@@ -142,5 +145,5 @@ export class WorkspaceLibrary {
     return { text, truncated: inspection.partial, inspection, raw, rawTruncated, observedAt, context: { repositoryPath: input.repositoryPath, workspaceId: input.workspaceId }, symbolId: input.symbolId };
   }
 
-  close(): void { this.cache.clear(); this.selectedSymbols.clear(); }
+  close(): void { this.cache.clear(); this.projects.clear(); this.selectedSymbols.clear(); }
 }

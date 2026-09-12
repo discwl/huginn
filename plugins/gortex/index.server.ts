@@ -12,6 +12,8 @@ import { WorkspaceLibrary } from "./server/workspace-library.ts";
 import { RepositoryMetadata } from "./server/repository-metadata.ts";
 import { RepositoryAdminLock } from "./server/repository-admin-lock.ts";
 import { RepositoryUntrack } from "./server/repository-untrack.ts";
+import { RepositoryTrack } from "./server/repository-track.ts";
+import { trackPreviewRpc, trackApplyRpc, trackJobRpc } from "./shared/track-contracts.ts";
 import { untrackPreviewRpc, untrackApplyRpc, untrackJobRpc } from "./shared/untrack-contracts.ts";
 import { metadataReadRpc, metadataPreviewRpc, metadataRepairRpc, metadataApplyRpc, metadataJobRpc } from "./shared/metadata-contracts.ts";
 
@@ -36,6 +38,10 @@ export default function contribute(server: PluginServerContext) {
   const admin = new RepositoryAdminLock();
   const metadata = new RepositoryMetadata(native, undefined, () => library.close(), admin);
   const untrack = new RepositoryUntrack(native, undefined, () => library.close(), admin);
+  const track = new RepositoryTrack(native, () => library.close(), admin);
+  server.handle(trackPreviewRpc, ({ path }) => track.preview(path));
+  server.handle(trackApplyRpc, ({ id }) => track.apply(id));
+  server.handle(trackJobRpc, ({ id, observe }) => observe ? track.observe(id) : track.job(id));
   server.handle(untrackPreviewRpc, ({ path }) => untrack.preview(path));
   server.handle(untrackApplyRpc, ({ id }) => untrack.apply(id));
   server.handle(untrackJobRpc, ({ id }) => untrack.job(id));
@@ -44,5 +50,5 @@ export default function contribute(server: PluginServerContext) {
   server.handle(metadataRepairRpc, ({ path, revision }) => metadata.previewRepair(path, revision));
   server.handle(metadataApplyRpc, ({ id }) => metadata.apply(id));
   server.handle(metadataJobRpc, ({ id }) => metadata.job(id));
-  return async () => { directories.close(); nativePicker.close(); await Promise.all([metadata.close(), untrack.close()]); library.close(); await native.close(); };
+  return async () => { directories.close(); nativePicker.close(); await Promise.all([metadata.close(), untrack.close(), track.close()]); library.close(); await native.close(); };
 }

@@ -53,7 +53,7 @@ export function NativeFolderButton({ host, theme, initialPath, onSelected }: Pro
   </View>;
 }
 
-export function SelectedNativeFolder({ host, theme, path, onOpen }: Props & { path: string; onOpen?: (path: string) => Promise<void> }) {
+export function SelectedNativeFolder({ host, theme, path, onOpen, onIndex }: Props & { path: string; onOpen?: (path: string) => Promise<void>; onIndex?: (path: string) => void }) {
   const inspect = useRpc(inspectRpc);
   const info = useQuery({ queryKey: [host.id, "gortex", "native-selection", path], queryFn: () => inspect({ path }), retry: false, staleTime: 0, refetchOnWindowFocus: false });
   const open = useMutation({ mutationFn: () => onOpen!(info.data!.canonicalPath) });
@@ -66,6 +66,7 @@ export function SelectedNativeFolder({ host, theme, path, onOpen }: Props & { pa
       <Notice theme={theme} text={`Repository root: ${info.data.repositoryRoot ?? "No Git repository detected"}`} />
       <Notice theme={theme} text={`Native tracking: ${info.data.tracking}`} />
       {info.data.warnings.map((warning, index) => <Notice key={index} theme={theme} text={warning} />)}
+      {onIndex && info.data.tracking === "not-in-catalog" && info.data.gitDirectoryKind === "directory" && info.data.repositoryRoot && <Action title="Index" icon="Database" theme={theme} onPress={() => onIndex(info.data!.repositoryRoot!)} />}
       {onOpen && <Button title="Open / reuse Paseo workspace" theme={theme} disabled={open.isPending} onPress={() => open.mutate()} />}
     </>}
     {open.error && <Notice theme={theme} error text={open.error.message} />}
