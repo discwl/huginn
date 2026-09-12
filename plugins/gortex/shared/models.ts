@@ -25,7 +25,8 @@ export const nativeInfoSchema = z.object({
 export const repositorySchema = z.object({
   name: z.string(), path: pathSchema, declaredWorkspace: z.string(), declaredProject: z.string(), assignmentSource: z.string(),
   workspaceId: z.string().nullable(), projectId: z.string().nullable(), graphName: z.string().nullable(),
-  state: z.enum(["resolved", "unavailable"]), error: z.string().nullable(),
+  origin: z.enum(["gortex", "paseo"]).optional(),
+  state: z.enum(["resolved", "unavailable", "untracked", "worktree", "unsupported"]), error: z.string().nullable(),
 });
 export const catalogSchema = z.object({
   version: z.string(), observedAt: z.string(),
@@ -34,7 +35,7 @@ export const catalogSchema = z.object({
   filteredTotal: z.number().int().nonnegative(), offset: z.number().int().nonnegative(),
   workspaces: z.array(catalogFacetSchema), projects: z.array(catalogFacetSchema),
   warnings: z.array(z.string()),
-  administration: z.object({ available: z.literal(false), reason: z.string() }),
+  administration: z.object({ available: z.boolean(), reason: z.string() }),
 });
 export const repositoryContextSchema = z.object({ repositoryPath: pathSchema, workspaceId: z.string().min(1).max(500) });
 export const inspectionSchema = z.object({

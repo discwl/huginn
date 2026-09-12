@@ -6,6 +6,7 @@ import { z } from "zod";
 import { nativeAssignmentSchema, nativeInfoSchema, type NativeAssignment, type NativeInfo } from "../shared/models.ts";
 import { decodeNativeResult, NativeError } from "./native-response.ts";
 import { runProcess } from "./process-runner.ts";
+import { resolveHostExecutable } from "./host-executable.ts";
 
 interface Connection { client: Client; ready: Promise<void>; active: number; touched: number }
 export interface NativePort {
@@ -54,11 +55,12 @@ export class GortexClient implements NativePort {
           this.connections.delete(idle[0]);
           await idle[1].client.close();
         }
+        const executable = await resolveHostExecutable(this.binary);
         if (this.closed) throw new NativeError("closed", "Gortex plugin connection is closed.");
         const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
         // Other documented presets select legacy names. Compact supplies the effect-split facade.
         env.GORTEX_TOOLS = "compact";
-        const transport = new StdioClientTransport({ command: this.binary, args: ["mcp", "--proxy", "--tools", "compact"], cwd: key, env, stderr: "ignore" });
+        const transport = new StdioClientTransport({ command: executable, args: ["mcp", "--proxy", "--tools", "compact"], cwd: key, env, stderr: "ignore" });
         const client = new Client({ name: "paseo-gortex", version: "0.1.0" });
         connection = { client, ready: Promise.resolve(), active: 0, touched: Date.now() };
         this.connections.set(key, connection);
@@ -130,6 +132,12 @@ export class GortexClient implements NativePort {
 
   checkouts(cwd: string): Promise<{ value: unknown; meta: unknown }> {
     return this.call(cwd, "workspace", { operation: "checkouts", arguments: { format: "json", max_bytes: 256000 } });
+  }
+
+  async track(path: string): Promise<void> {
+    // Explicit CLI adapter for a new root: a repository-bound MCP session cannot admit it yet.
+    // The caller reconciles the native catalog; stdout is not treated as an index receipt.
+    await runProcess(this.binary, ["track", path, "--no-progress"], path, { timeoutMs: 60000, maxBytes: 65536 });
   }
 
   untrack(path: string, confirm: boolean): Promise<{ value: unknown; meta: unknown }> {

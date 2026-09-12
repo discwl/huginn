@@ -2,13 +2,21 @@
 
 A trusted local Paseo plugin for browsing the connected host's native Gortex
 workspaces, checking daemon and host index health, inspecting code, and editing
-repository metadata and exclusions, and explicitly untracking repositories.
+repository metadata and exclusions, and explicitly tracking or untracking repositories.
 
 ## Current features
 
 - A full-width, host-scoped repository library with name/path search, configured
   workspace/project filters, sorting, and 12 rows per page. Filters cover the entire
   native assignment catalog, including repositories beyond the first 50 entries.
+- Paseo projects on the selected host appear alongside Gortex repositories. Standalone
+  Git roots without native tracking show **Not indexed** and an **Index** button.
+  The confirmation previews the canonical path and native defaults before tracking;
+  completion refreshes Gortex's authoritative catalog. If its native view is pending,
+  the open dialog checks readiness every three seconds for up to one minute, then
+  offers **Check readiness**. These checks never replay tracking. Directory aliases
+  and nested project paths are deduplicated. Worktrees, ordinary folders and inaccessible paths
+  show separate states and do not offer ordinary tracking.
 - Focused repository search/settings views with an **All repositories** return
   action that preserves library filters and page. Compact screens stack row metadata.
 - A compact daemon status strip and a separate **Host health** tab for detailed
@@ -34,8 +42,9 @@ repository metadata and exclusions, and explicitly untracking repositories.
   configuration backup, rechecks the preview, and displays the native outcome.
   Primary graph/checkout removal requires a second confirmation of Gortex's exact
   affected-view list. Source files and Paseo workspaces remain unchanged.
-- A Windows **Browse...** button that opens a native folder dialog on the selected
-  host's desktop and inspects the chosen directory. It does not track a new repo.
+- A Windows **Browse...** button opens a native folder dialog on the selected host's
+  desktop and inspects the chosen directory. An eligible new Git root offers the
+  same separate **Index** confirmation.
 
 Repository membership and graph state belong to Gortex. Plugin preferences hold
 presentation and query settings, not a separate repository registry. Connections
@@ -44,8 +53,15 @@ explicit repository working directories.
 
 ## Current limits
 
-- Creating/tracking repositories, deliberately forgetting worktrees, and changing
+- Creating source repositories, deliberately forgetting worktrees, and changing
   primary checkouts are not exposed. Use native Gortex tooling for those actions.
+- The library includes at most 500 Paseo projects and labels a truncated project
+  list. Directory discovery has a 20-second budget and at most four active reads;
+  folders that cannot be checked in time remain unavailable until a later refresh.
+  They remain unassigned display entries until native Gortex tracking exists;
+  selecting a native workspace/project filter hides those unassigned candidates.
+  A Paseo or Gortex catalog failure is shown explicitly, never interpreted as proof
+  that all projects are unindexed.
 - Ordinary automatic worktrees have no separate config entry to untrack. Untracking
   a dedicated worktree can return it to automatic indexing while a primary survives;
   it is not a permanent worktree exclusion. Missing paths and ambiguous or mismatched
@@ -69,11 +85,14 @@ explicit repository working directories.
 The installed integration was validated with Paseo `0.8.0-beta.1`, Gortex
 `0.64.3+56a1c29`, and Node `22.14.0`. The manifest accepts Paseo
 `>=0.8.0-beta.1 <0.9.0`. Read adapters require Gortex 0.64.2 or newer; metadata writes
-and untracking are gated to the verified 0.64.3 contract and are unavailable for
+and tracking/untracking are gated to the verified 0.64.3 contract and are unavailable for
 unverified versions.
 
-Gortex must be available on the Paseo daemon account's `PATH`, with its existing
-configuration and shared daemon accessible to that account. The Windows folder
+Gortex and Git must be available on the Paseo daemon account's `PATH`, with Gortex's
+existing configuration and shared daemon accessible to that account. Native commands
+are resolved to absolute host executable paths before using a repository working
+directory; empty or relative `PATH` entries are ignored. Configure an absolute
+Gortex executable path if it is not on `PATH`. The Windows folder
 picker requires PowerShell 7 with Windows Forms and an interactive Windows desktop.
 It checks `PATH` and standard MSI, WindowsApps, and .NET tool installation paths.
 Failed checks are retried, so installing PowerShell does not require restarting the
@@ -237,6 +256,16 @@ installation the native checkout-family catalog is empty, so the fixture explici
 skips native demotion/primary-closure cases; those response paths have unit coverage.
 See [server/untrack-contracts.md](server/untrack-contracts.md) for confirmation behavior,
 precondition limits and proposed panel/command additions.
+`node --experimental-strip-types server/track-native-fixture.ts` starts an isolated
+empty daemon and verifies first-repository tracking, native workspace/project defaults,
+a searchable index, Unicode paths, duplicate prevention and source preservation.
+The adapter uses the public `gortex track <path> --no-progress` command, then reconciles
+`workspace list --json` and native repository context. No daemon restart is needed.
+Preview tokens expire after five minutes and compare fresh config, catalog and Git
+root identity before writing. A lost response is marked uncertain, pauses further
+plugin administration and requires reconciliation instead of blindly replaying track.
+Other native clients are outside the plugin's write lock; coordinate administration.
+
 These checks do not replace desktop/mobile UI testing.
 
 See [server/metadata-contracts.md](server/metadata-contracts.md) for the current
