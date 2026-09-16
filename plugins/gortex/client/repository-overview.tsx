@@ -12,7 +12,10 @@ type Props = {
   onRefresh: () => void;
 };
 
+import { useHostDateTime } from "./host-time.tsx";
+
 export function RepositoryOverview({ theme, report, loading, error, onRefresh }: Props) {
+  const dateTime = useHostDateTime();
   const [details, setDetails] = useState(false);
   const [raw, setRaw] = useState(false);
   const index = indexSummarySchema.safeParse(report?.value);
@@ -46,10 +49,10 @@ export function RepositoryOverview({ theme, report, loading, error, onRefresh }:
           <Badge theme={theme} icon={index.data.unreadable_file_count ? "AlertTriangle" : "Check"} label={`${index.data.unreadable_file_count} unreadable files`} tone={index.data.unreadable_file_count ? "danger" : "neutral"} />
         </View>
       </> : <Notice theme={theme} text={refreshing ? "Gortex is preparing the host index report. Refresh the summary again shortly." : "This report needs a newer summary adapter. The native response is available in the details below."} />}
-      <Notice theme={theme} text={`Host-wide snapshot · Updated ${new Date(report.observedAt).toLocaleTimeString()}. Counts can differ from daemon health when sampled at different times.`} />
+      <Notice theme={theme} text={`Host-wide snapshot · Updated ${dateTime(report.observedAt)}. Counts can differ from daemon health when sampled at different times.`} />
       <Disclosure theme={theme} title="Scope and native response" open={details} onToggle={() => setDetails(value => !value)}>
         <Notice theme={theme} text="Gortex's native index-health report is shared across the daemon. These are not per-repository or per-workspace statistics. Source and symbol search still use the selected repository." />
-        {index.success && index.data.last_index_time && <Notice theme={theme} text={`Last native index time: ${index.data.last_index_time}`} />}
+        {index.success && index.data.last_index_time && <Notice theme={theme} text={`Last native index time: ${dateTime(index.data.last_index_time)}`} />}
         <Action theme={theme} title={raw ? "Hide response" : "Show native response"} icon="Braces" onPress={() => setRaw(value => !value)} />
         {raw && <><ScrollView nestedScrollEnabled style={{ maxHeight: 320, borderRadius: 10, backgroundColor: theme.colors.surface0 }}><ScrollView horizontal contentContainerStyle={{ padding: 14 }}><Text selectable style={{ color: theme.colors.foreground, fontFamily: "monospace", fontSize: 12, lineHeight: 18 }}>{response.slice(0, 8000)}</Text></ScrollView></ScrollView>{response.length > 8000 && <Notice theme={theme} text="Response display is limited to 8,000 characters." />}</>}
       </Disclosure>

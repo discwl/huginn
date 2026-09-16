@@ -11,7 +11,10 @@ const stages = { checking: "Checking the installed binary…", downloading: "Dow
 const states = { unchecked: "Not checked", available: "Update available", current: "Up to date", ahead: "Newer than latest release", unavailable: "Check unavailable" };
 
 export function GortexUpdatesPanel(props: Props) { return <HostUpdates key={props.host.id} {...props} />; }
+import { useHostDateTime } from "./host-time.tsx";
+
 function HostUpdates({ host, theme }: Props) {
+  const dateTime = useHostDateTime();
   const read = useRpc(updateStatusRpc), check = useRpc(updateCheckRpc), prepare = useRpc(updatePreviewRpc), apply = useRpc(updateApplyRpc), poll = useRpc(updateJobRpc);
   const queries = useQueryClient(), statusKey = [host.id, "gortex", "update-status"], jobKey = [host.id, "gortex", "update-job"];
   const [preview, setPreview] = useState<UpdatePreview | null>(null), [error, setError] = useState<string | null>(null);
@@ -63,13 +66,13 @@ function HostUpdates({ host, theme }: Props) {
     {!data && status.isFetching && <Notice theme={theme} text="Reading the installed version…" />}
     {data && <>
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
-        <Text selectable style={{ color: theme.colors.foreground, fontSize: 15, fontWeight: "600" }}>{data.installation.version}</Text>
+        <Text selectable style={{ color: theme.colors.foreground, fontSize: 15, fontWeight: "600" }}>{data.installation.version.replace(/\+.*$/, "")}</Text>
         <Badge theme={theme} label={status.isError ? "Previous observation" : states[data.state]} tone={status.isError || data.state === "unavailable" || data.state === "available" ? "warning" : data.state === "current" ? "success" : "neutral"} />
         {data.latestVersion && <Notice theme={theme} text={`${data.state === "unavailable" ? "Last known release" : "Latest release"}: ${data.latestVersion}`} />}
       </View>
       {data.error && <Notice theme={theme} error text={data.error} />}
       {data.installation.reason && <Notice theme={theme} text={data.installation.reason} />}
-      {data.checkedAt && <Notice theme={theme} text={`Checked ${new Date(data.checkedAt).toLocaleString()} on ${host.label}.`} />}
+      {data.checkedAt && <Notice theme={theme} text={`Checked ${dateTime(data.checkedAt)} on ${host.label}.`} />}
     </>}
     {status.error && <Notice theme={theme} error text={status.error.message} />}
     {error && <Notice theme={theme} error text={error} />}
@@ -81,12 +84,13 @@ function HostUpdates({ host, theme }: Props) {
     {(job.error || error) && <Action theme={theme} title="Check progress" icon="RefreshCw" disabled={busy || job.isFetching} onPress={() => { void job.refetch(); }} />}
     {result && <>
       <Badge theme={theme} label={result.outcome === "updated" ? "Update verified" : result.outcome === "failed" ? "Update did not start" : "Update needs attention"} tone={result.outcome === "updated" ? "success" : "warning"} />
-      {result.installedVersion && <Notice theme={theme} text={`Installed binary: ${result.installedVersion} · ${result.daemonReachable ? "Daemon reachable" : "Daemon availability not verified"}`} />}
+      {result.installedVersion && <Notice theme={theme} text={`Installed binary: ${result.installedVersion.replace(/\+.*$/, "")} · ${result.daemonReachable ? "Daemon reachable" : "Daemon availability not verified"}`} />}
       {result.error && <Notice theme={theme} error text={result.error} />}
       {result.backupPath && <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>Previous executable: {result.backupPath}</Text>}
       {result.outcome !== "updated" && <Action theme={theme} title="Review current state" icon="RefreshCw" disabled={locked} onPress={checkUpdates} />}
     </>}
     {data && <Disclosure theme={theme} title="Installation details" open={details} onToggle={() => setDetails(value => !value)}>
+      <Notice theme={theme} text={`Build: ${data.installation.version}`} />
       <Text selectable style={{ color: theme.colors.foregroundMuted, fontFamily: "monospace", fontSize: 12, lineHeight: 18 }}>{data.installation.binary}</Text>
       <Notice theme={theme} text="Checks the official stable release only when requested. Updates apply to Gortex on this host; plugin updates are managed separately by Paseo." />
       {data.releaseUrl && <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{data.releaseUrl}</Text>}
@@ -94,7 +98,7 @@ function HostUpdates({ host, theme }: Props) {
     {preview && <Modal title={`Update Gortex on ${host.label}?`} icon={<Icon name="Download" size={18} color={theme.colors.accent} />} open onOpenChange={open => { if (!open && !busy) setPreview(null); }}>
       <Modal.Content><View style={{ gap: 14 }}>
         <Badge theme={theme} label={host.label} icon="Monitor" />
-        <Text style={{ color: theme.colors.foreground, fontSize: 17, fontWeight: "600" }}>{preview.installation.version} → {preview.targetVersion}</Text>
+        <Text style={{ color: theme.colors.foreground, fontSize: 17, fontWeight: "600" }}>{preview.installation.version.replace(/\+.*$/, "")} → {preview.targetVersion}</Text>
         <Text selectable style={{ color: theme.colors.foregroundMuted, fontFamily: "monospace", fontSize: 12, lineHeight: 18 }}>{preview.installation.binary}</Text>
         {preview.warnings.map(warning => <Notice key={warning} theme={theme} text={warning} />)}
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>

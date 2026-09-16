@@ -19,7 +19,16 @@ import { trackPreviewRpc, trackApplyRpc, trackJobRpc } from "./shared/track-cont
 import { untrackPreviewRpc, untrackApplyRpc, untrackJobRpc } from "./shared/untrack-contracts.ts";
 import { metadataReadRpc, metadataPreviewRpc, metadataRepairRpc, metadataApplyRpc, metadataJobRpc } from "./shared/metadata-contracts.ts";
 
+import { RepositoryWorktrees } from "./server/repository-worktrees.ts";
+import { worktreesRpc } from "./shared/worktree-contracts.ts";
+
+import { hostTimeRpc } from "./shared/date-time.ts";
+
 export default function contribute(server: PluginServerContext) {
+  server.handle(hostTimeRpc, () => {
+    const { timeZone, locale } = new Intl.DateTimeFormat().resolvedOptions();
+    return { timeZone, locale };
+  });
   const nativePicker = new NativeFolderPicker();
   server.handle(hostHealthRpc, () => readHostHealth(native));
   server.handle(hostSavingsRpc, readHostSavings);
@@ -29,6 +38,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(nativePickerCancelRpc, ({ id }) => nativePicker.cancel(id));
   const native = new GortexClient();
   const library = new WorkspaceLibrary(native);
+  const worktrees = new RepositoryWorktrees(native);
+  server.handle(worktreesRpc, ({ path, offset }) => worktrees.list(path, offset));
   const directories = new DirectoryBrowser();
   server.registerSettings(preferences);
   server.handle(catalogRpc, input => library.catalog(input.offset, input));
@@ -58,5 +69,5 @@ export default function contribute(server: PluginServerContext) {
   server.handle(metadataRepairRpc, ({ path, revision }) => metadata.previewRepair(path, revision));
   server.handle(metadataApplyRpc, ({ id }) => metadata.apply(id));
   server.handle(metadataJobRpc, ({ id }) => metadata.job(id));
-  return async () => { directories.close(); nativePicker.close(); await Promise.all([metadata.close(), untrack.close(), track.close(), updates.close()]); library.close(); await native.close(); };
+  return async () => { directories.close(); nativePicker.close(); await Promise.all([metadata.close(), untrack.close(), track.close(), updates.close(), worktrees.close()]); library.close(); await native.close(); };
 }

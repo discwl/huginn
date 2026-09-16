@@ -10,7 +10,10 @@ import { GortexUpdatesPanel } from "./gortex-updates.tsx";
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
 function uptime(seconds: number) { const minutes = Math.floor(seconds / 60); return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
 
+import { useHostDateTime } from "./host-time.tsx";
+
 export function HostHealth({ host, theme, compact = false, onDetails }: Props & { compact?: boolean; onDetails?: () => void }) {
+  const dateTime = useHostDateTime();
   const read = useRpc(hostHealthRpc);
   const [details, setDetails] = useState(false);
   const report = useQuery({ queryKey: [host.id, "gortex", "host-health"], queryFn: () => read({}), retry: false, refetchInterval: 30000, refetchIntervalInBackground: false, refetchOnWindowFocus: false });
@@ -47,7 +50,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
         <Metric theme={theme} icon="Cpu" label="Allocated memory" value={`${(health.alloc_bytes / 1048576).toFixed(1)} MiB`} detail={`${(health.db_bytes / 1048576).toFixed(1)} MiB database`} />
         <Metric theme={theme} icon="Clock" label="Uptime" value={uptime(health.uptime_seconds)} detail={`${health.sessions} MCP ${health.sessions === 1 ? "session" : "sessions"}`} />
       </View>
-      <Notice theme={theme} text={`Updated ${new Date(health.ts).toLocaleTimeString()} · Refreshes every 30 seconds while this panel is active.`} />
+      <Notice theme={theme} text={`Updated ${dateTime(health.ts)} · Refreshes every 30 seconds while this panel is active.`} />
       <Disclosure theme={theme} title="Runtime details" open={details} onToggle={() => setDetails(value => !value)}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 24 }}>{[
           ["Language servers", `${health.lsp_alive} running / ${health.lsp_specs_registered} configured`],
