@@ -95,6 +95,10 @@ export class GortexClient implements NativePort {
       throw new NativeError("mcp_unavailable", "Gortex MCP request failed. Verify the existing daemon is reachable, then refresh. The plugin does not start or restart it.");
     } finally { connection.active--; }
     // Semantic/native response errors do not tear down a healthy shared connection.
+    const envelope = result as { isError?: boolean; content?: { type: string; text?: string }[] };
+    if (name === "workspace" && args.operation === "checkouts" && envelope.isError && envelope.content?.some(block => block.type === "text" && /^indexer: no tracked repository matches: corpus .+ has no dedicated graph$/.test(block.text ?? ""))) {
+      throw new NativeError("checkout_catalog_missing", "Gortex has no checkout-family graph record for this repository.");
+    }
     return decodeNativeResult(result);
   }
 
@@ -131,6 +135,16 @@ export class GortexClient implements NativePort {
     if (operation === "source") return this.call(cwd, "read", { operation: "source", target: { symbol: args.symbolId }, output: { format: "json", max_bytes: 12000 } });
     if (operation === "impact") return this.call(cwd, "change", { operation: "impact", target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
     return this.call(cwd, "relations", { operation, target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
+  }
+
+  async repositoryIndexes(): Promise<unknown> {
+    const raw = await runProcess(this.binary, ["repos", "--json"], homedir(), { maxBytes: 256000 });
+    try { return JSON.parse(raw); }
+    catch { throw new NativeError("repository_index_shape", "Gortex returned an invalid repository index catalog."); }
+  }
+
+  checkoutFamily(cwd: string): Promise<{ value: unknown; meta: unknown }> {
+    return this.call(cwd, "workspace", { operation: "checkouts", arguments: { family: cwd, format: "json", max_bytes: 256000 } });
   }
 
   checkouts(cwd: string): Promise<{ value: unknown; meta: unknown }> {

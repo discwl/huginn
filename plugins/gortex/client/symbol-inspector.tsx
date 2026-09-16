@@ -54,11 +54,14 @@ function groupTitle(operation: InspectorOperation, depth: number | null): string
   return `${depth} steps away`;
 }
 
+import { useHostDateTime } from "./host-time.tsx";
+
 export function SymbolInspector({ theme, location, snapshot, loading, error, onTab, onSelect, onBack, onForward, canBack, canForward, onRefresh }: {
   theme: Theme; location: InspectorLocation; snapshot?: SymbolSnapshot; loading: boolean; error: Error | null;
   onTab: (operation: InspectorOperation) => void; onSelect: (symbol: InspectorSymbol) => void;
   onBack: () => void; onForward: () => void; canBack: boolean; canForward: boolean; onRefresh: () => void;
 }) {
+  const dateTime = useHostDateTime();
   const [rawOpen, setRawOpen] = useState(false), [contextOpen, setContextOpen] = useState(false);
   const [filter, setFilter] = useState(""), [filterFocused, setFilterFocused] = useState(false), [copyStatus, setCopyStatus] = useState("");
   const data = !error ? snapshot?.inspection : undefined;
@@ -98,7 +101,7 @@ export function SymbolInspector({ theme, location, snapshot, loading, error, onT
         </ScrollView> : <View style={{ padding: 24, alignItems: "center", gap: 10, borderWidth: 1, borderRadius: 12, borderColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}><Icon name={tabIcons[location.operation]} size={26} color={theme.colors.foregroundMuted} /><Notice theme={theme} text={filter ? "No displayed symbols match this filter." : data.partial ? "No items available in this partial response." : "No items returned by the native index. This does not establish complete coverage."} /></View>}
       </>}
       <View style={{ gap: 5 }}>{data.warnings.map(warning => <Notice key={warning} theme={theme} text={warning} />)}</View>
-      <Notice theme={theme} text={`Workspace: ${snapshot.context.workspaceId} · Observed ${new Date(snapshot.observedAt).toLocaleTimeString()}`} />
+      <Notice theme={theme} text={`Workspace: ${snapshot.context.workspaceId} · Observed ${dateTime(snapshot.observedAt)}`} />
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 }}><Action theme={theme} title="Copy displayed context" icon="Copy" onPress={() => { void copyText(snapshot.text).then(() => setCopyStatus("Copied source, visible evidence and provenance.")).catch(() => { setCopyStatus("Clipboard unavailable. Expand Context to copy and select the text."); setContextOpen(true); }); }} />{copyStatus && <Notice theme={theme} text={copyStatus} />}</View>
       <Disclosure theme={theme} title="Context to copy · scope and provenance" open={contextOpen} onToggle={() => setContextOpen(!contextOpen)}><ScrollView nestedScrollEnabled style={{ maxHeight: 260 }}><Text selectable style={{ ...mono, color: theme.colors.foreground }}>{snapshot.text}</Text></ScrollView></Disclosure>
       <Disclosure theme={theme} title="Raw native response · JSON" open={rawOpen} onToggle={() => setRawOpen(!rawOpen)}>{snapshot.rawTruncated && <Notice theme={theme} text="Raw response truncated at its display budget." />}<ScrollView nestedScrollEnabled style={{ maxHeight: 260 }}><ScrollView horizontal><Text selectable style={{ ...mono, color: theme.colors.foreground }}>{snapshot.raw}</Text></ScrollView></ScrollView></Disclosure>

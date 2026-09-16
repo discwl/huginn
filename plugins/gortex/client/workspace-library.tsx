@@ -8,6 +8,7 @@ import { decodePaseoProjects, emptyCatalogFilters, type CatalogFilters } from ".
 import { RepositoryTrackDialog } from "./repository-track-dialog.tsx";
 import type { Repository } from "../shared/models.ts";
 import { SymbolSearch } from "./symbol-search.tsx";
+import { RepositoryWorktrees } from "./repository-worktrees.tsx";
 import { HostHealth } from "./host-health.tsx";
 import { NativeFolderButton, SelectedNativeFolder } from "./native-folder-picker.tsx";
 import { RepositoryNavigator, repositoryPageSize } from "./repository-navigator.tsx";
@@ -17,7 +18,9 @@ import { Action, Badge, Card, Notice, SectionHeading } from "./controls.tsx";
 
 import { RepositoryUntrackDialog } from "./repository-untrack-dialog.tsx";
 
-export function LibrarySurface(props: PluginSurfaceProps) { return <HostLibrary key={props.host.id} {...props} />; }
+import { HostTimeProvider } from "./host-time.tsx";
+
+export function LibrarySurface(props: PluginSurfaceProps) { return <HostTimeProvider key={props.host.id} hostId={props.host.id}><HostLibrary {...props} /></HostTimeProvider>; }
 
 function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
   const listCatalog = useRpc(catalogRpc), indexStatus = useRpc(statusRpc);
@@ -34,7 +37,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
   const [indexRepositoryTarget, setIndexRepositoryTarget] = useState<{ name: string; path: string } | null>(null);
   const [repositoryChanged, setRepositoryChanged] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
-  const [tab, setTab] = useState<"search" | "settings">("search");
+  const [tab, setTab] = useState<"search" | "settings" | "worktrees">("search");
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const compact = layout.compact || width < 1040;
@@ -105,7 +108,7 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <View style={{ flexDirection: "row", gap: 12, alignItems: "center", flexShrink: 1 }}>
           <View style={{ width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 11, backgroundColor: theme.colors.surface2 }}><Icon name="Network" size={22} color={theme.colors.accent} /></View>
-          <View style={{ gap: 3, flexShrink: 1 }}><View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}><Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 25, lineHeight: 31, fontWeight: "700" }}>Gortex</Text>{version && <Badge theme={theme} label={version.replace(/^gortex\s+/, "")} />}</View><Notice theme={theme} text={`Native code intelligence on ${host.label}`} /></View>
+          <View style={{ gap: 3, flexShrink: 1 }}><View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}><Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 25, lineHeight: 31, fontWeight: "700" }}>Gortex</Text>{version && <Badge theme={theme} label={version.replace(/^gortex\s+/, "").replace(/\+.*$/, "")} />}</View><Notice theme={theme} text={`Native code intelligence on ${host.label}`} /></View>
         </View>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
           {section === "repositories" && !repository && <Action title={catalog.isFetching ? "Refreshing…" : "Refresh"} icon="RefreshCw" theme={theme} disabled={catalog.isFetching || paseoProjects.isFetching || !queryCurrent} onPress={() => { void refreshLibrary(); }} />}
@@ -134,9 +137,11 @@ function HostLibrary({ theme, host, layout, navigation }: PluginSurfaceProps) {
           {repository.graphName && repository.name !== repository.graphName && <Notice theme={theme} text="The configured name differs from the active graph. Review Repository settings to resolve the mismatch." />}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             <Action title="Search & inspect" icon="Search" theme={theme} selected={tab === "search"} disabled={!context} onPress={() => setTab("search")} />
+            <Action title="Worktrees" icon="GitBranch" theme={theme} selected={tab === "worktrees"} onPress={() => setTab("worktrees")} />
             <Action title="Repository settings" icon="Settings2" theme={theme} selected={tab === "settings"} onPress={() => setTab("settings")} />
           </View>
           {openError && <Notice theme={theme} error text={openError} />}
+          {tab === "worktrees" && <RepositoryWorktrees key={`${host.id}:${repository.path}`} path={repository.path} host={host} theme={theme} onOpen={navigation ? open : undefined} />}
           {context && <View style={{ display: tab === "search" ? "flex" : "none", minWidth: 0 }}>
             {settings.status !== "ready" && <Notice theme={theme} text="Using the default limit of 50 results while search preferences are unavailable." />}
             <SymbolSearch key={`${context.workspaceId}:${context.repositoryPath}`} theme={theme} host={host} context={context} limit={settings.status === "ready" ? settings.values.searchLimit : 50} />

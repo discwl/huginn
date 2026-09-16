@@ -108,6 +108,5 @@ export function RepositoryNavigator({ theme, compact, catalog, filters, loading,
         </View>}
       </View>
     </>}
-    <Notice theme={theme} text="Workspace and project filters use saved configuration. Code queries use the verified active context shown inside each repository." />
   </Card>;
 }

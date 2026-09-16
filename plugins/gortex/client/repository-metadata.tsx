@@ -15,7 +15,10 @@ const labels = { name: "Repository name", workspace: "Workspace", project: "Proj
 const keys = ["name", "workspace", "project"] as const;
 const stages = { validating: "Checking preview…", saving: "Saving configuration…", reloading: "Reloading Gortex configuration…", indexing: "Refreshing this repository’s index…", verifying: "Verifying daemon state…", done: "Finished" };
 
+import { useHostDateTime } from "./host-time.tsx";
+
 export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Props) {
+  const dateTime = useHostDateTime();
   const read = useRpc(metadataReadRpc), previewChange = useRpc(metadataPreviewRpc), repair = useRpc(metadataRepairRpc), apply = useRpc(metadataApplyRpc), poll = useRpc(metadataJobRpc);
   const queries = useQueryClient();
   const data = useQuery({ queryKey: [host.id, "gortex", "metadata", path], queryFn: () => read({ path }), retry: false, refetchOnWindowFocus: false, staleTime: 0 });
@@ -118,7 +121,7 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
         {!!current.extra.unknownKeys.length && <Notice theme={theme} text={`Unrecognized per-repo keys: ${current.extra.unknownKeys.join(", ")}`} />}
         <Notice theme={theme} text="More options belong in the repo’s .gortex.yaml: include/exclude rules, project path mappings, language-server settings, and architecture rules. They are separate from repos entries in the host config." />
       </Disclosure>
-      <Notice theme={theme} text={`Observed ${new Date(current.observedAt).toLocaleTimeString()} · ${current.configPath}`} />
+      <Notice theme={theme} text={`Observed ${dateTime(current.observedAt)} · ${current.configPath}`} />
     </>}
     {error && <Notice theme={theme} error text={error} />}
     {jobId && <View style={{ gap: 10 }}>
