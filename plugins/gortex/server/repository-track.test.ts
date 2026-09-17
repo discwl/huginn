@@ -32,6 +32,31 @@ async function finish(service: RepositoryTrack, id: string) {
   throw new Error("Tracking job did not finish");
 }
 
+for (const version of ["gortex v0.64.4", "gortex v0.64.99+build", "gortex v0.65.0", "gortex v1.0.0"]) {
+  test(`tracking admits ${version} while preserving preview and confirmation`, async () => {
+    const f = await fixture();
+    try {
+      f.native.version = async () => version;
+      const preview = await f.service.preview(f.path);
+      assert.equal(f.writes(), 0);
+      const result = await finish(f.service, f.service.apply(preview.id).id);
+      assert.equal(result.outcome, "tracked");
+      assert.equal(f.writes(), 1);
+    } finally { await f.close(); }
+  });
+}
+
+test("a version change after tracking preview invalidates approval without writing", async () => {
+  const f = await fixture();
+  try {
+    const preview = await f.service.preview(f.path);
+    f.native.version = async () => "gortex v0.64.4";
+    const result = await finish(f.service, f.service.apply(preview.id).id);
+    assert.equal(result.outcome, "failed");
+    assert.equal(f.writes(), 0);
+  } finally { await f.close(); }
+});
+
 test("tracking preview is read-only; repeated confirmation submits one native write and refreshes authoritative state", async () => {
   const f = await fixture();
   try {
@@ -260,7 +285,7 @@ test("plain folders, automatic worktrees, prefix collisions and unsupported vers
     await assert.rejects(f.service.preview(worktree), /worktree|submodule/i);
     f.rows.push({ repo: "new café repo", path: join(f.root, "different"), workspace: "other", project: "other", source: "global" });
     await assert.rejects(f.service.preview(f.path), /name|prefix/i); f.rows.length = 0;
-    f.native.version = async () => "gortex v9.0.0";
+    f.native.version = async () => "gortex v9.0.0-rc.1";
     await assert.rejects(f.service.preview(f.path), /compatibility|verified/i);
     assert.equal(f.writes(), 0);
   } finally { await f.close(); }

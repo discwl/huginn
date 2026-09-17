@@ -145,8 +145,8 @@ test("malformed, truncated and unexpected native plans never authorize confirm:t
 });
 
 test("unknown versions, offline daemon, graph mismatch and incomplete catalogs cannot preview", async t => {
-  const f = await fixture(t); f.state.version = "gortex v0.65.0";
-  await assert.rejects(() => f.service.preview(f.path), /compatibility/);
+  const f = await fixture(t); f.state.version = "gortex v0.65.0-rc.1";
+  await assert.rejects(() => f.service.preview(f.path), /stable Gortex release/);
   f.state.version = "gortex v0.64.3"; f.state.offline = true;
   await assert.rejects(() => f.service.preview(f.path), /offline/); f.state.offline = false;
   f.native.checkouts = async () => ({ value: { families: [], _truncated: true }, meta: {} });

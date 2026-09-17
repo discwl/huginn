@@ -114,6 +114,18 @@ test("a selected source snapshot has provenance and a bounded, visible truncatio
   } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
 });
 
+test("an empty native search (results: null) is an empty page with its scope note, not a shape error", async () => {
+  const f = await fixture(); const context = { repositoryPath: f.paths[0], workspaceId: "workspace-a" };
+  try {
+    f.setReply({ query_class: "symbol", results: null, scope_note: "0 results within the active scope (repo:repo-0)", total: 0, truncated: false });
+    const page = await f.library.search({ ...context, query: "Missing", cursor: null, limit: 50 });
+    assert.deepEqual(page.results, []); assert.equal(page.total, 0);
+    assert.ok(page.warnings.includes("0 results within the active scope (repo:repo-0)"));
+    f.setReply({ results: "not a list" });
+    await assert.rejects(f.library.search({ ...context, query: "Other", cursor: null, limit: 50 }), /Unsupported native search response/);
+  } finally { f.library.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
 test("only displayed native relationships with matching scope grant further source navigation", async () => {
   const f = await fixture(); const context = { repositoryPath: f.paths[0], workspaceId: "workspace-a" };
   const root = { id: "repo-0/file.ts::Root", name: "Root", kind: "function", file_path: "repo-0/file.ts", repo_prefix: "repo-0", workspace_id: "workspace-a" };

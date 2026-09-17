@@ -9,6 +9,7 @@ import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { globalConfigPath, sameRepositoryPath } from "./repository-config.ts";
 import { inspectProjectDirectory } from "./project-catalog.ts";
 import { runProcess } from "./process-runner.ts";
+import { requireNativeCompatibility } from "../shared/native-compatibility.ts";
 
 export interface TrackPort extends Pick<NativePort, "assignments" | "info" | "version"> {
   track(path: string): Promise<void>;
@@ -62,7 +63,7 @@ export class RepositoryTrack {
     const [version, rows, globalDigest, localDigest, identity] = await Promise.all([
       this.native.version(), this.native.assignments(), configDigest(this.configPath), configDigest(join(root, ".gortex.yaml")), stat(join(root, ".git")),
     ]);
-    if (!/^gortex v0\.64\.3(?:\+|$)/.test(version)) throw new Error("Tracking is verified for Gortex 0.64.3. This host needs an adapter compatibility update.");
+    requireNativeCompatibility(version);
     if (await this.registered(root, rows)) throw new Error("This repository is already tracked. Refresh the library to use its existing native index.");
     const name = basename(root);
     if (rows.some(row => row.repo.toLowerCase() === name.toLowerCase())) throw new Error("Another repository already uses this native name. Choose a distinct name with native Gortex tracking before continuing.");

@@ -1,6 +1,7 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
+import { nativeCompatibility } from "../shared/native-compatibility.ts";
 import { symbolSchema, type Catalog, type Inspection, type NativeAssignment, type Repository, type RepositoryContext, type SearchPage } from "../shared/models.ts";
 import type { NativePort } from "./gortex-client.ts";
 import { NativeError } from "./native-response.ts";
@@ -12,7 +13,7 @@ import type { InspectorOperation, SymbolSnapshot } from "../shared/symbol-inspec
 import { catalogInputSchema, pageAssignments, type CatalogInput } from "../shared/catalog-browser.ts";
 
 const administrationReason = "New standalone Git repositories can be indexed after confirmation on supported Gortex hosts. Existing repository metadata is managed in Repository settings.";
-const searchResultSchema = z.object({ results: z.array(symbolSchema).max(50), total: z.number().optional(), next_cursor: z.string().optional().nullable(), truncated: z.boolean().optional(), fetch_escalated: z.boolean().optional() }).passthrough();
+const searchResultSchema = z.object({ results: z.array(symbolSchema).max(50).nullable().transform(results => results ?? []), total: z.number().optional(), scope_note: z.string().optional(), next_cursor: z.string().optional().nullable(), truncated: z.boolean().optional(), fetch_escalated: z.boolean().optional() }).passthrough();
 function samePath(a: string, b: string): boolean { return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b; }
 function message(error: unknown): string { return error instanceof Error ? error.message : "Host operation failed."; }
 
@@ -51,7 +52,7 @@ export class WorkspaceLibrary {
       version, repositories, ...page,
       observedAt: new Date().toISOString(),
       warnings: ["Membership is the observed native session context. Index state is queried separately on demand.", "Exact checkout selection is unavailable until the native checkout/view contract is verified."],
-      administration: { available: /^gortex v0\.64\.3(?:\+|$)/.test(version), reason: administrationReason },
+      administration: nativeCompatibility(version),
     };
   }
 
@@ -120,7 +121,7 @@ export class WorkspaceLibrary {
       if (data.results.some(symbol => symbol.workspace_id !== input.workspaceId || symbol.repo_prefix !== repository.graphName)) throw new NativeError("wrong_scope", "Native search returned a different repository or workspace; the result was rejected.");
       for (const symbol of data.results) this.selectedSymbols.set(JSON.stringify([input.workspaceId, repository.path, symbol.id]), Date.now() + 10 * 60 * 1000);
       while (this.selectedSymbols.size > 500) this.selectedSymbols.delete(this.selectedSymbols.keys().next().value!);
-      return { results: data.results, total: data.total, nextCursor: data.next_cursor ?? null, truncated: data.truncated ?? false, expanded: data.fetch_escalated ?? false, warnings: ["Current repository context; exact checkout selection is not established.", ...(data.fetch_escalated ? ["Gortex broadened this search; results may not literally match the query."] : [])], context: input, meta: report.meta, observedAt: new Date().toISOString() };
+      return { results: data.results, total: data.total, nextCursor: data.next_cursor ?? null, truncated: data.truncated ?? false, expanded: data.fetch_escalated ?? false, warnings: ["Current repository context; exact checkout selection is not established.", ...(data.fetch_escalated ? ["Gortex broadened this search; results may not literally match the query."] : []), ...(data.scope_note ? [data.scope_note] : [])], context: input, meta: report.meta, observedAt: new Date().toISOString() };
     });
   }
 
