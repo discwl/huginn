@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { homedir } from "node:os";
+import { requireNativeCompatibility, requireTrackCliSupport } from "../shared/native-compatibility.ts";
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import { nativeAssignmentSchema, nativeInfoSchema, type NativeAssignment, type NativeInfo } from "../shared/models.ts";
@@ -36,9 +37,10 @@ export class GortexClient implements NativePort {
 
   async version(): Promise<string> {
     const output = await runProcess(this.binary, ["version"], homedir(), { maxBytes: 4096 });
-    const match = /^gortex v0\.64\.(\d+)(?:\+[^\s]+)?/m.exec(output);
-    if (!match || Number(match[1]) < 2) throw new NativeError("unsupported_version", "This adapter requires Gortex 0.64.2 or a compatible 0.64 patch release.");
-    return match[0];
+    const match = /^gortex\s+(\S+)[ \t]*$/m.exec(output);
+    if (!match) throw new NativeError("unsupported_version", "Gortex did not report a recognizable version.");
+    requireNativeCompatibility(match[1], false);
+    return `gortex ${match[1]}`;
   }
 
   private async acquire(key: string): Promise<Connection> {
@@ -87,6 +89,14 @@ export class GortexClient implements NativePort {
     let result: unknown;
     try {
       await connection.ready;
+      if (name === "workspace_admin") {
+        const advertised = await connection.client.listTools({}, { timeout: 15000 });
+        const tool = advertised.tools.find(tool => tool.name === name);
+        const operation = tool?.inputSchema.properties?.operation as { enum?: unknown[] } | undefined;
+        if (!tool || (Array.isArray(operation?.enum) && !operation.enum.includes(args.operation))) {
+          throw new NativeError("unsupported_operation", `This Gortex host does not advertise workspace_admin.${String(args.operation)}. Update the plugin or enable the native operation before retrying. No request was sent.`);
+        }
+      }
       result = await connection.client.callTool({ name, arguments: args }, undefined, { timeout });
     } catch (error) {
       if (this.connections.get(key) === connection) this.connections.delete(key);
@@ -154,6 +164,8 @@ export class GortexClient implements NativePort {
   async track(path: string): Promise<void> {
     // Explicit CLI adapter for a new root: a repository-bound MCP session cannot admit it yet.
     // The caller reconciles the native catalog; stdout is not treated as an index receipt.
+    const help = await runProcess(this.binary, ["track", "--help"], path, { timeoutMs: 10000, maxBytes: 16384 });
+    requireTrackCliSupport(help);
     await runProcess(this.binary, ["track", path, "--no-progress"], path, { timeoutMs: 60000, maxBytes: 65536 });
   }
 

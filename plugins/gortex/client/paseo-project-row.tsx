@@ -25,6 +25,6 @@ export function PaseoProjectRow({ theme, repository, compact, trackingAvailable,
       </View>
     </View>
     {repository.error && <Notice theme={theme} text={repository.error} error={repository.state === "unavailable"} />}
-    {canIndex && !trackingAvailable && <Notice theme={theme} text="Indexing from Paseo is verified for Gortex 0.64.3. This host needs a compatible adapter." />}
+    {canIndex && !trackingAvailable && <Notice theme={theme} text="Indexing is unavailable for this host’s reported Gortex version. Use a stable release 0.64.3 or newer and refresh the library." />}
   </View>;
 }

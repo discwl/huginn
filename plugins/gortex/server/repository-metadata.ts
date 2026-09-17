@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { requireNativeCompatibility } from "../shared/native-compatibility.ts";
 import type { MetadataJob, MetadataPreview, RepositoryFields, RepositoryMetadata as Metadata } from "../shared/metadata-contracts.ts";
 import type { NativePort } from "./gortex-client.ts";
 import { RepositoryConfig, sameRepositoryPath, type ConfigSnapshot } from "./repository-config.ts";
@@ -33,7 +34,7 @@ export class RepositoryMetadata {
     if (!isAbsolute(path)) throw new Error("Choose an absolute repository path on the selected host.");
     const canonical = await realpath(path);
     const [version, rows] = await Promise.all([this.native.version(), this.native.assignments()]);
-    if (!/^gortex v0\.64\.3(?:\+|$)/.test(version)) throw new Error("Repository metadata editing is verified for Gortex 0.64.3. This host requires an adapter compatibility update.");
+    requireNativeCompatibility(version);
     const matches = [];
     for (const row of rows) {
       try { if (sameRepositoryPath(await realpath(row.path), canonical)) matches.push(row); } catch { /* No authorization from an unavailable path. */ }

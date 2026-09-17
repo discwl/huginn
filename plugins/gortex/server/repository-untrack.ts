@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { open, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
+import { requireNativeCompatibility } from "../shared/native-compatibility.ts";
 import { z } from "zod";
 import { nativeUntrackPlanSchema, nativeUntrackReceiptSchema, type UntrackJob, type UntrackPreview } from "../shared/untrack-contracts.ts";
 import type { NativePort } from "./gortex-client.ts";
@@ -46,7 +47,7 @@ export class RepositoryUntrack {
     if (!isAbsolute(path)) throw new Error("Choose an absolute repository path on the selected host.");
     const canonical = await realpath(path);
     const [version, rows, config] = await Promise.all([this.native.version(), this.native.assignments(), this.config.load(canonical)]);
-    if (!/^gortex v0\.64\.3(?:\+|$)/.test(version)) throw new Error("Untracking is verified for Gortex 0.64.3. This host needs an adapter compatibility update.");
+    requireNativeCompatibility(version);
     const matches = [];
     for (const row of rows) {
       try { if (sameRepositoryPath(await realpath(row.path), canonical)) matches.push(row); } catch { /* An unavailable path cannot authorize another target. */ }

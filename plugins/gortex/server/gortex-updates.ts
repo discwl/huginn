@@ -252,7 +252,7 @@ export class GortexUpdates {
     const warnings = ["Updates Gortex for every client using this host. A running daemon may restart, briefly interrupting code queries and applying its saved configuration.", "Repository tracking and agent configuration are not edited by this update. No index rebuild or enrichment is requested."];
     if (status.installation.method === "windows-release") warnings.push("Downloads the official Windows release, requires a matching SHA-256 checksum, and retains the previous executable beside the installed binary.");
     else warnings.push("Uses Gortex's detected native updater. Package managers control their available version and may install a newer release than the one shown. Agent configuration migration is disabled.");
-    if (!/^v0\.64\.3$/.test(status.latestVersion)) warnings.push("Repository administration is currently verified for Gortex 0.64.3 only. Updating can disable those controls until this plugin supports the new version; releases outside 0.64.x can also make code queries unavailable.");
+    warnings.push("The plugin validates native responses and operation support. A breaking Gortex API change may require a plugin update; newer stable version numbers alone do not disable repository controls.");
     const preview = { id: randomUUID(), expiresAt: new Date(this.now() + 300_000).toISOString(), installation: status.installation, targetVersion: status.latestVersion, releaseUrl: status.releaseUrl, warnings };
     if (this.previews.size >= 40) this.previews.delete(this.previews.keys().next().value!);
     this.previews.set(preview.id, preview); return preview;
