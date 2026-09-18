@@ -22,6 +22,13 @@ test("native errors and malformed results cannot become empty success", () => {
   ]) assert.throws(() => decodeNativeResult(result));
 });
 
+test("native rejections carry Gortex's bounded, single-line reason", () => {
+  assert.throws(() => decodeNativeResult({ isError: true, content: [{ type: "text", text: "indexer: path\n  is not tracked" }] }), /Gortex rejected the request\. Gortex said: indexer: path is not tracked$/);
+  assert.throws(() => decodeNativeResult({ isError: true, content: [{ type: "text", text: "x".repeat(1000) }] }), error => error instanceof Error && error.message.length < 460 && error.message.endsWith("…"));
+  assert.throws(() => decodeNativeResult({ isError: true, content: [] }), /Gortex rejected the request\.$/);
+  assert.throws(() => decodeNativeResult({ content: [{ type: "text", text: '{"error_code":"wrong_scope","message":"wrong workspace"}' }] }), /wrong_scope.*Gortex said: wrong workspace/);
+});
+
 test("an inexact route is rejected, including nested response metadata", () => {
   assert.throws(() => decodeNativeResult({ structuredContent: { results: [] }, _meta: { freshness: { exact: false, fallback: "base" } } }), /exact|fallback/i);
   assert.throws(() => decodeNativeResult({ structuredContent: { freshness: { exact: false }, results: [] } }), /exact|fallback/i);

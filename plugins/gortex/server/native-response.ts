@@ -15,10 +15,18 @@ function rejectFallback(value: unknown, depth = 0): void {
   for (const item of Object.values(record)) if (object(item)) rejectFallback(item, depth + 1);
 }
 
+/** Gortex's own explanation, bounded and single-line, so a rejection is diagnosable without raw logs. */
+function nativeReason(blocks: unknown): string {
+  const text = (Array.isArray(blocks) ? blocks : []).map(object)
+    .map(block => block?.type === "text" && typeof block.text === "string" ? block.text : "")
+    .join(" ").replace(/\s+/g, " ").trim();
+  return text ? ` Gortex said: ${text.length > 400 ? `${text.slice(0, 400)}…` : text}` : "";
+}
+
 export function decodeNativeResult(result: unknown): { value: unknown; meta: unknown } {
   const envelope = object(result);
   if (!envelope) throw new NativeError("invalid_response", "Gortex returned an invalid MCP envelope.");
-  if (envelope.isError === true) throw new NativeError("mcp_error", "Gortex rejected the request. Check the selected context and native capabilities.");
+  if (envelope.isError === true) throw new NativeError("mcp_error", `Gortex rejected the request.${nativeReason(envelope.content)}`);
   let value: unknown = envelope.structuredContent;
   if (value === undefined) {
     const blocks = Array.isArray(envelope.content) ? envelope.content : [];
@@ -31,7 +39,8 @@ export function decodeNativeResult(result: unknown): { value: unknown; meta: unk
   const payload = object(value);
   if (payload && (payload.error_code || payload.error || payload.isError === true || payload.status === "error")) {
     const code = typeof payload.error_code === "string" ? payload.error_code : "native_error";
-    throw new NativeError(code, `Gortex reported ${code}. The operation did not produce a successful result.`);
+    const detail = [payload.message, payload.error].find((item): item is string => typeof item === "string" && item.trim() !== "");
+    throw new NativeError(code, `Gortex reported ${code}. The operation did not produce a successful result.${detail ? nativeReason([{ type: "text", text: detail }]) : ""}`);
   }
   const meta = envelope._meta ?? null;
   rejectFallback(meta);
