@@ -19,6 +19,7 @@ async function fixture() {
   let writes = 0, invalidations = 0;
   const native: TrackPort = {
     version: async () => "gortex v0.64.3+fixture", assignments: async () => rows,
+    trackSupport: async () => {},
     track: async target => { writes++; rows.push({ repo: "new café repo", path: target, workspace: "personal", project: "automation", source: "global" }); },
     info: async target => ({ workspace: "personal", project: "automation", mode: "workspace", members: [{ name: "new café repo", path: target }] }),
     refreshContexts: async () => {},
@@ -125,17 +126,49 @@ test("a repository registered after preview is never tracked a second time", asy
   } finally { await f.close(); }
 });
 
-test("a lost native response reconciles a saved entry without blind retry or fabricated readiness", async () => {
+test("a lost native response whose entry the catalog confirms is indexing, without pausing writes or retrying", async () => {
   const f = await fixture();
   try {
     const track = f.native.track;
     f.native.track = async path => { await track(path); throw new Error("Connection lost after configuration save"); };
     const result = await finish(f.service, f.service.apply((await f.service.preview(f.path)).id).id);
-    assert.equal(result.outcome, "uncertain"); assert.equal(result.registered, true); assert.equal(result.repository, null);
+    assert.equal(result.outcome, "indexing"); assert.equal(result.registered, true); assert.equal(result.repository, null);
+    assert.match(result.error!, /Connection lost/);
+    assert.equal((await f.service.observe(result.id)).outcome, "tracked");
+    assert.equal(f.writes(), 1); assert.doesNotThrow(() => f.lock.acquire()());
+    await assert.rejects(f.service.preview(f.path), /already tracked/i);
+  } finally { await f.close(); }
+});
+
+test("an unknown outcome the catalog cannot confirm still pauses writes without publishing readiness", async () => {
+  const f = await fixture();
+  try {
+    f.native.track = async () => { throw Object.assign(new Error("Host command timed out"), { code: "timeout" }); };
+    const result = await finish(f.service, f.service.apply((await f.service.preview(f.path)).id).id);
+    assert.equal(result.outcome, "uncertain"); assert.equal(result.registered, false);
     f.native.info = async () => { assert.fail("An uncertain job must not publish readiness."); };
     assert.equal((await f.service.observe(result.id)).outcome, "uncertain");
-    assert.equal(f.writes(), 1); assert.throws(() => f.lock.acquire(), /unverified|uncertain/i);
-    await assert.rejects(f.service.preview(f.path), /already tracked/i);
+    assert.throws(() => f.lock.acquire(), /unverified/i);
+  } finally { await f.close(); }
+});
+
+test("a failed native command with no catalog entry is a plain failure that leaves writes available", async () => {
+  const f = await fixture();
+  try {
+    f.native.track = async () => { throw Object.assign(new Error("Host command failed (exit 1)"), { code: "process_failed" }); };
+    const result = await finish(f.service, f.service.apply((await f.service.preview(f.path)).id).id);
+    assert.equal(result.outcome, "failed"); assert.equal(result.registered, false);
+    assert.doesNotThrow(() => f.lock.acquire()());
+  } finally { await f.close(); }
+});
+
+test("an unsupported track interface fails before any write and does not pause administration", async () => {
+  const f = await fixture();
+  try {
+    f.native.trackSupport = async () => { throw new Error("This Gortex executable does not advertise the required track interface. No tracking request was sent."); };
+    const result = await finish(f.service, f.service.apply((await f.service.preview(f.path)).id).id);
+    assert.equal(result.outcome, "failed"); assert.equal(f.writes(), 0);
+    assert.doesNotThrow(() => f.lock.acquire()());
   } finally { await f.close(); }
 });
 
@@ -276,12 +309,37 @@ test("concurrent native observations share one read and close joins it without p
   } finally { await f.close(); }
 });
 
-test("plain folders, automatic worktrees, prefix collisions and unsupported versions cannot start tracking", async () => {
+test("a plain folder previews and tracks with a no-Git warning", async () => {
   const f = await fixture();
   try {
-    const plain = join(f.root, "plain"), worktree = join(f.root, "worktree");
-    await mkdir(plain); await mkdir(worktree); await writeFile(join(worktree, ".git"), "gitdir: missing\n");
-    await assert.rejects(f.service.preview(plain), /Git|folder/i);
+    const plain = join(f.root, "plain notes");
+    await mkdir(plain);
+    const preview = await f.service.preview(plain);
+    assert.equal(preview.git, false); assert.equal(preview.path, await realpath(plain));
+    assert.match(preview.warnings[0], /no Git repository/);
+    assert.equal(f.writes(), 0);
+    const result = await finish(f.service, f.service.apply(preview.id).id);
+    assert.equal(result.outcome, "tracked"); assert.equal(f.writes(), 1);
+  } finally { await f.close(); }
+});
+
+test("a plain folder that contains or sits inside a tracked repository is refused before writing", async () => {
+  const f = await fixture();
+  try {
+    const parent = join(f.root, "workspace folder"), child = join(parent, "tracked-app"), inner = join(child, "docs");
+    await mkdir(inner, { recursive: true });
+    f.rows.push({ repo: "tracked-app", path: child, workspace: "w", project: "p", source: "global" });
+    await assert.rejects(f.service.preview(parent), /contains tracked-app/);
+    await assert.rejects(f.service.preview(inner), /inside tracked-app/);
+    assert.equal(f.writes(), 0);
+  } finally { await f.close(); }
+});
+
+test("automatic worktrees, prefix collisions and unsupported versions cannot start tracking", async () => {
+  const f = await fixture();
+  try {
+    const worktree = join(f.root, "worktree");
+    await mkdir(worktree); await writeFile(join(worktree, ".git"), "gitdir: missing\n");
     await assert.rejects(f.service.preview(worktree), /worktree|submodule/i);
     f.rows.push({ repo: "new café repo", path: join(f.root, "different"), workspace: "other", project: "other", source: "global" });
     await assert.rejects(f.service.preview(f.path), /name|prefix/i); f.rows.length = 0;

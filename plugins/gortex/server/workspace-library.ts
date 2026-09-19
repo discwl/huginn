@@ -7,7 +7,7 @@ import type { NativePort } from "./gortex-client.ts";
 import { NativeError } from "./native-response.ts";
 import { runProcess } from "./process-runner.ts";
 import { QueryCache } from "./query-cache.ts";
-import { ProjectCatalog, repositoryPathKey } from "./project-catalog.ts";
+import { ProjectCatalog, findEnclosingGit, repositoryPathKey } from "./project-catalog.ts";
 import { fitInspection, normalizeInspection } from "./symbol-inspection.ts";
 import type { InspectorOperation, SymbolSnapshot } from "../shared/symbol-inspection.ts";
 import { catalogInputSchema, pageAssignments, type CatalogInput } from "../shared/catalog-browser.ts";
@@ -77,13 +77,19 @@ export class WorkspaceLibrary {
     const warnings: string[] = [];
     let repositoryRoot: string | null = null;
     let gitDirectoryKind: Inspection["gitDirectoryKind"] = "none";
+    let plainFolder = false;
     try {
       const result = await runProcess("git", ["-C", canonical, "rev-parse", "--show-toplevel"], canonical, { maxBytes: 65536 });
       const root = result.replace(/[\r\n]+$/, "");
       if (root.includes("\n") || root.includes("\r") || !isAbsolute(root)) throw new Error("Unsupported Git root path response.");
       repositoryRoot = await realpath(root);
       try { const git = await lstat(join(repositoryRoot, ".git")); gitDirectoryKind = git.isDirectory() ? "directory" : git.isFile() ? "file" : "unknown"; } catch { gitDirectoryKind = "unknown"; }
-    } catch { warnings.push("Git root could not be established. This may be a plain folder, denied access, or unavailable Git; plain-folder tracking is not offered."); }
+    } catch {
+      plainFolder = await findEnclosingGit(canonical).then(found => found === null, () => false);
+      warnings.push(plainFolder
+        ? "No Git repository: this is a plain folder. Gortex can index it without branch, worktree or change-history features. Initialize Git first if you want those."
+        : "The Git repository root could not be established. Check Git installation and folder access.");
+    }
     let repository: Repository | null = null;
     let tracking: Inspection["tracking"] = "unknown";
     try {
@@ -99,7 +105,7 @@ export class WorkspaceLibrary {
     if (gitDirectoryKind === "file") warnings.push("Git uses an indirection file here; this may be an automatic worktree or submodule. Dedicated tracking is not inferred.");
     if (tracking === "not-in-catalog") warnings.push("Not in the dedicated catalog does not rule out an automatic worktree view.");
     warnings.push(administrationReason);
-    return { selectedPath: path, canonicalPath: canonical, repositoryRoot, gitDirectoryKind, tracking, repository, warnings, observedAt: new Date().toISOString() };
+    return { selectedPath: path, canonicalPath: canonical, repositoryRoot, gitDirectoryKind, plainFolder, tracking, repository, warnings, observedAt: new Date().toISOString() };
   }
 
   async status(input: RepositoryContext): Promise<{ value: unknown; meta: unknown; observedAt: string; scope: "host" }> {

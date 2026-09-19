@@ -10,8 +10,8 @@ export type PickerRuntime =
 
 const probeSchema = z.object({ status: z.enum(["ready", "powershell_version", "windows_forms", "desktop"]) });
 const reasons = {
-  powershell_version: "PowerShell 7 is required on this host. Install Microsoft.PowerShell, then try Browse again.",
-  windows_forms: "PowerShell started, but the modern Windows Forms folder dialog is unavailable. Install or repair PowerShell 7 on this host, then try Browse again.",
+  powershell_version: "Browse needs PowerShell 7; this host only has an older PowerShell. Install it with: winget install Microsoft.PowerShell",
+  windows_forms: "PowerShell 7 can't open the Windows folder dialog here. Repair PowerShell 7 on this host.",
   desktop: "No interactive Windows desktop is available to Paseo on this host. Run Paseo in a signed-in Windows desktop session; the folder dialog opens there, including through Remote Desktop.",
 };
 
@@ -31,7 +31,7 @@ export async function findWindowsPickerRuntime(dependencies: {
   if (win32.isAbsolute(home)) candidates.push(win32.join(home, ".dotnet", "tools", "pwsh.exe"));
   const unique = candidates.filter((candidate, index) => candidates.findIndex(other => other.toLowerCase() === candidate.toLowerCase()) === index);
   const deadline = Date.now() + 10000;
-  let reason = "PowerShell 7 could not be started on this host. Install Microsoft.PowerShell on this host, or check its executable permissions, then try Browse again.";
+  let reason = "Browse needs PowerShell 7 on this host. Install it with: winget install Microsoft.PowerShell";
   for (const executable of unique) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
@@ -44,7 +44,7 @@ export async function findWindowsPickerRuntime(dependencies: {
     } catch (error) {
       // Do not expose subprocess output, environment values, or credentials in diagnostics.
       if (!(error instanceof Error && "code" in error && error.code === "process_unavailable")) {
-        reason = "PowerShell's folder-picker check failed or returned an invalid response. Install or repair PowerShell 7 on this host, then try Browse again.";
+        reason = "PowerShell 7's folder-picker check failed. Repair PowerShell 7 on this host.";
       }
     }
   }

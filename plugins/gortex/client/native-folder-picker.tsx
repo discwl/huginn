@@ -5,6 +5,8 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { nativePickerCapabilitiesRpc, nativePickerStartRpc, nativePickerPollRpc, nativePickerCancelRpc } from "../shared/native-picker-contracts.ts";
 import { inspectRpc } from "../shared/contracts.ts";
 import { Action, Button, Card, Notice } from "./controls.tsx";
+import { GitInitControl } from "./git-init.tsx";
+import { localDaemonServerId, openDesktopFolderDialog } from "./web.ts";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
 export function NativeFolderButton({ host, theme, initialPath, onSelected }: Props & { initialPath?: string; onSelected: (path: string) => void }) {
@@ -19,7 +21,12 @@ export function NativeFolderButton({ host, theme, initialPath, onSelected }: Pro
   cancelOnUnmount.current = cancel;
   const activeId = useRef<string | null>(null);
   const handledId = useRef<string | null>(null);
-  const support = useQuery({ queryKey: [host.id, "gortex", "native-picker-support"], queryFn: () => capabilities({}), retry: false, staleTime: 60000, refetchOnWindowFocus: false });
+  // In the desktop app with this computer's daemon selected, use Paseo's own native dialog: instant, no PowerShell.
+  const local = useQuery({ queryKey: ["gortex", "desktop-local-daemon"], queryFn: localDaemonServerId, retry: false, staleTime: Infinity, refetchOnWindowFocus: false });
+  const desktopLocal = local.data !== undefined && local.data !== null && local.data === host.id;
+  const desktop = useMutation({ mutationFn: () => openDesktopFolderDialog({ title: "Choose a folder for Gortex", defaultPath: initialPath }), onSuccess: path => { if (path) onSelected(path); } });
+  // Otherwise (remote host, browser, mobile), the host-side PowerShell picker is only offered when it actually works there.
+  const support = useQuery({ queryKey: [host.id, "gortex", "native-picker-support"], queryFn: () => capabilities({}), enabled: local.isFetched && !desktopLocal, retry: false, staleTime: 60000, refetchOnWindowFocus: false });
   const launch = useMutation({ mutationFn: () => start({ initialPath }), onSuccess: ({ id }) => {
     if (!mounted.current) { void cancel({ id }).catch(() => {}); return; }
     activeId.current = id; setJobId(id); setNotice(null);
@@ -38,8 +45,12 @@ export function NativeFolderButton({ host, theme, initialPath, onSelected }: Pro
     else setNotice(value.error ?? "Folder selection cancelled.");
   }, [result.data, onSelected]);
   const busy = launch.isPending || abort.isPending || jobId !== null;
-  if (support.isError) return <Notice theme={theme} error text="Windows folder picker availability could not be checked. Reopen Gortex to try again." />;
-  if (!support.data?.available) return support.isFetching ? <Notice theme={theme} text="Checking Windows folder picker…" /> : <Notice theme={theme} text={support.data?.reason ?? "Native folder picker unavailable."} />;
+  if (desktopLocal) return <View style={{ gap: 6, maxWidth: 300, alignItems: "flex-end" }}>
+    <Action title={desktop.isPending ? "Choosing folder…" : "Browse…"} icon="FolderOpen" primary theme={theme} disabled={desktop.isPending} onPress={() => desktop.mutate()} />
+    {desktop.error && <Notice theme={theme} error text={desktop.error.message} />}
+  </View>;
+  // No picker for this host: hide Browse rather than show a warning. Paseo projects can still be indexed from the list.
+  if (!support.data?.available) return null;
   return <View style={{ gap: 6 }}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
       <Action title={busy ? "Choosing folder…" : "Browse…"} icon="FolderOpen" primary theme={theme} disabled={busy} onPress={() => { setNotice(null); launch.mutate(); }} />
@@ -67,6 +78,8 @@ export function SelectedNativeFolder({ host, theme, path, onOpen, onIndex }: Pro
       <Notice theme={theme} text={`Native tracking: ${info.data.tracking}`} />
       {info.data.warnings.map((warning, index) => <Notice key={index} theme={theme} text={warning} />)}
       {onIndex && info.data.tracking === "not-in-catalog" && info.data.gitDirectoryKind === "directory" && info.data.repositoryRoot && <Action title="Index" icon="Database" theme={theme} onPress={() => onIndex(info.data!.repositoryRoot!)} />}
+      {onIndex && info.data.tracking === "not-in-catalog" && info.data.plainFolder && <Action title="Index plain folder" icon="Database" theme={theme} onPress={() => onIndex(info.data!.canonicalPath)} />}
+      {info.data.plainFolder && <GitInitControl host={host} theme={theme} path={info.data.canonicalPath} onChanged={() => { void info.refetch(); }} />}
       {onOpen && <Button title="Open / reuse Paseo workspace" theme={theme} disabled={open.isPending} onPress={() => open.mutate()} />}
     </>}
     {open.error && <Notice theme={theme} error text={open.error.message} />}

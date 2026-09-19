@@ -6,7 +6,14 @@ import { catalogInputSchema } from "./catalog-browser.ts";
 
 export const preferences = defineSettings({
   id: "preferences", scope: "host", version: 1,
-  schema: z.object({ searchLimit: z.number().int().min(1).max(50).default(50) }),
+  schema: z.object({
+    searchLimit: z.number().int().min(1).max(50).default(50),
+    // Opt-in: index new Paseo projects on this host and assign them to defaultWorkspace (empty keeps the native default).
+    autoIndex: z.boolean().default(false),
+    defaultWorkspace: z.string().max(160).regex(/^[^\x00-\x1f\x7f]*$/, "Use a single line without control characters").default(""),
+    // Agent for exclusion suggestions, as provider/model. It must offer a plan or read-only mode.
+    suggestionAgent: z.string().max(200).regex(/^[a-z0-9._-]+(\/[^\s\x00-\x1f\x7f]+)?$/i, "Use provider/model, e.g. claude/claude-sonnet-5").default("claude/claude-sonnet-5"),
+  }),
 });
 export const catalogRpc = defineRpc({ name: "catalog.list", input: catalogInputSchema, output: catalogSchema });
 export const directoryRpc = defineRpc({ name: "directory.list", input: directoryInputSchema, output: directoryPageSchema });

@@ -27,6 +27,8 @@ export const repositorySchema = z.object({
   workspaceId: z.string().nullable(), projectId: z.string().nullable(), graphName: z.string().nullable(),
   origin: z.enum(["gortex", "paseo"]).optional(),
   state: z.enum(["resolved", "unavailable", "untracked", "worktree", "unsupported"]), error: z.string().nullable(),
+  // Paseo-only candidates: false for a plain folder (no .git), which Gortex can still index.
+  git: z.boolean().optional(),
 });
 export const catalogSchema = z.object({
   version: z.string(), observedAt: z.string(),
@@ -43,6 +45,8 @@ export const inspectionSchema = z.object({
   repositoryRoot: pathSchema.nullable(), gitDirectoryKind: z.enum(["directory", "file", "unknown", "none"]),
   tracking: z.enum(["dedicated", "not-in-catalog", "unknown"]),
   repository: repositorySchema.nullable(),
+  // True when neither the folder nor any parent has a .git entry: a plain folder Gortex can still index.
+  plainFolder: z.boolean().optional(),
   warnings: z.array(z.string()), observedAt: z.string(),
 });
 export const nativeReportSchema = z.object({

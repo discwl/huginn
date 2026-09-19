@@ -6,6 +6,7 @@ import { hostHealthRpc } from "../shared/health-contracts.ts";
 import { Action, Badge, Card, Disclosure, Metric, Notice, SectionHeading } from "./controls.tsx";
 import { ReportedSavings } from "./reported-savings.tsx";
 import { GortexUpdatesPanel } from "./gortex-updates.tsx";
+import { PluginUpdatesPanel } from "./plugin-updates.tsx";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
 function uptime(seconds: number) { const minutes = Math.floor(seconds / 60); return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
@@ -62,6 +63,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
       </Disclosure>
     </>}
     <GortexUpdatesPanel host={host} theme={theme} />
+      <PluginUpdatesPanel host={host} theme={theme} />
     <ReportedSavings host={host} theme={theme} />
   </Card>;
 }
