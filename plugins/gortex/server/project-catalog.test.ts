@@ -89,17 +89,29 @@ test("unknown native catalog state is an error, never an unindexed badge", async
   } finally { await f.close(); }
 });
 
-test("worktrees, plain folders and missing paths cannot offer ordinary dedicated tracking", async () => {
+test("plain folders can be indexed; worktrees and missing paths cannot offer ordinary dedicated tracking", async () => {
   const f = await fixture();
   try {
     const plain = join(f.root, "plain"), linked = join(f.root, "worktree");
     await mkdir(plain); await mkdir(linked); await writeFile(join(linked, ".git"), "gitdir: missing-fixture-control\n");
     const projects = [plain, linked, join(f.root, "gone")].map((path, i) => ({ id: String(i), name: String(i), path }));
     const catalog = await f.library.catalog(0, { paseoProjects: projects });
-    for (const path of projects.map(project => project.path)) assert.notEqual(catalog.repositories.find(row => row.path === path)!.state, "untracked");
-    assert.equal(catalog.repositories.find(row => row.path === linked)!.state, "worktree");
-    assert.equal(catalog.repositories.find(row => row.path === plain)!.state, "unsupported");
-    assert.equal(catalog.repositories.find(row => row.path.endsWith("gone"))!.state, "unavailable");
+    const row = (path: string) => catalog.repositories.find(candidate => candidate.path === path)!;
+    assert.equal(row(plain).state, "untracked"); assert.equal(row(plain).git, false);
+    assert.equal(row(linked).state, "worktree");
+    assert.equal(catalog.repositories.find(candidate => candidate.path.endsWith("gone"))!.state, "unavailable");
+  } finally { await f.close(); }
+});
+
+test("a subfolder maps to its enclosing repository without running Git", async () => {
+  const f = await fixture();
+  try {
+    const repo = join(f.root, "parent-repo"), nested = join(repo, "src", "feature");
+    await mkdir(join(repo, ".git"), { recursive: true }); await mkdir(nested, { recursive: true });
+    const catalog = await new ProjectCatalog({ io: { runProcess: async () => { throw new Error("Git must not be required"); } } }).merge([], [{ id: "n", name: "nested", path: nested }]);
+    const [candidate] = [...catalog.candidates.values()];
+    assert.equal(candidate.state, "untracked"); assert.equal(candidate.git, true);
+    assert.equal(candidate.path, await realpath(repo));
   } finally { await f.close(); }
 });
 
@@ -133,22 +145,25 @@ test("an empty Paseo project list preserves native rows without starting filesys
   assert.equal(reads, 0);
 });
 
-test("500 slow Git probes share one deadline and cache, retain native rows, and never continue scanning in the background", async () => {
+test("500 slow parent-folder probes share one deadline and cache, retain native rows, and never continue scanning in the background", async () => {
   const projects = budgetProjects(500);
   const rows: NativeAssignment[] = [{ path: join(tmpdir(), "native-budget-row"), repo: "native", workspace: "personal", project: "tools", source: "global" }];
   const releases: Array<() => void> = [];
+  const parentControl = join(tmpdir(), ".git");
   let launched = 0, active = 0, maximum = 0, metadataReads = 0;
   const catalog = new ProjectCatalog({ discoveryBudgetMs: 60, io: {
     realpath: async path => { metadataReads++; return path; },
     stat: async () => { metadataReads++; return directoryStat; },
-    lstat: async () => { metadataReads++; throw Object.assign(new Error("No root control path"), { code: "ENOENT" }); },
-    runProcess: async (_command, _args, cwd, options) => {
-      assert.ok(options?.timeoutMs && options.timeoutMs <= 60, "The Git timeout must fit the remaining discovery budget");
+    // Each project's own .git is absent; the shared parent probe is the slow step.
+    lstat: async path => {
+      const missing = Object.assign(new Error("No control path"), { code: "ENOENT" });
+      if (path !== parentControl) { metadataReads++; throw missing; }
       launched++; active++; maximum = Math.max(maximum, active);
-      const pending = pendingValue<string>();
-      releases.push(() => pending.resolve(cwd + "\n"));
-      try { return await pending.promise; } finally { active--; }
+      const pending = pendingValue<void>();
+      releases.push(() => pending.resolve());
+      try { await pending.promise; throw missing; } finally { active--; }
     },
+    runProcess: async () => { throw new Error("Discovery must not require the Git executable"); },
   } });
   try {
     const start = performance.now();
@@ -173,7 +188,7 @@ test("500 slow Git probes share one deadline and cache, retain native rows, and 
     await delay(20);
     assert.equal(active, 0);
     assert.equal(launched, 4);
-    assert.equal(metadataReads, readsAtDeadline, "Late Git results and expired queued work must not start another filesystem step");
+    assert.equal(metadataReads, readsAtDeadline, "Late probe results and expired queued work must not start another filesystem step");
   } finally { releases.forEach(release => release()); }
 });
 

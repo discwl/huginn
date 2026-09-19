@@ -9,6 +9,8 @@ import { PaseoProjectRow } from "./paseo-project-row.tsx";
 
 type Props = {
   theme: PluginSurfaceProps["theme"];
+  host: PluginSurfaceProps["host"];
+  onGitChanged: () => void;
   compact: boolean;
   catalog?: Catalog;
   filters: CatalogFilters;
@@ -49,7 +51,7 @@ function RepositoryRow({ theme, repository, compact, onOpen, onSettings, onUntra
   </View>;
 }
 
-export function RepositoryNavigator({ theme, compact, catalog, filters, loading, error, onFilters, onRepository, onMetadata, onUntrack, onIndex, onPage }: Props) {
+export function RepositoryNavigator({ theme, host, onGitChanged, compact, catalog, filters, loading, error, onFilters, onRepository, onMetadata, onUntrack, onIndex, onPage }: Props) {
   const [focused, setFocused] = useState(false);
   const [menu, setMenu] = useState<"workspace" | "project" | "sort" | null>(null);
   const [optionQuery, setOptionQuery] = useState("");
@@ -97,7 +99,7 @@ export function RepositoryNavigator({ theme, compact, catalog, filters, loading,
         {!compact && <View style={{ flexDirection: "row", gap: 12, paddingHorizontal: 12, paddingBottom: 10, paddingRight: 140 }}>
           {[{ title: "REPOSITORY", flex: 1 }, { title: "WORKSPACE", width: 150 }, { title: "PROJECT", width: 130 }, { title: "CODE ACCESS", width: 115 }].map(column => <Text key={column.title} style={{ flex: column.flex, width: column.width, color: theme.colors.foregroundMuted, fontSize: 10, fontWeight: "600", letterSpacing: 1 }}>{column.title}</Text>)}
         </View>}
-        {catalog.repositories.map(repository => repository.origin === "paseo" ? <PaseoProjectRow key={repository.path} theme={theme} repository={repository} compact={compact} trackingAvailable={catalog.administration.available} onIndex={() => onIndex(repository)} /> : <RepositoryRow key={repository.path} theme={theme} repository={repository} compact={compact} onOpen={() => onRepository(repository)} onSettings={() => onMetadata(repository)} onUntrack={() => onUntrack(repository)} />)}
+        {catalog.repositories.map(repository => repository.origin === "paseo" ? <PaseoProjectRow key={repository.path} theme={theme} host={host} onGitChanged={onGitChanged} repository={repository} compact={compact} trackingAvailable={catalog.administration.available} onIndex={() => onIndex(repository)} /> : <RepositoryRow key={repository.path} theme={theme} repository={repository} compact={compact} onOpen={() => onRepository(repository)} onSettings={() => onMetadata(repository)} onUntrack={() => onUntrack(repository)} />)}
       </View> : <View style={{ alignItems: "center", paddingVertical: 36, gap: 12 }}><Icon name="FolderSearch" size={30} color={theme.colors.accent} /><Text style={{ color: theme.colors.foreground, fontSize: 17, fontWeight: "600" }}>{catalog.total === 0 ? "No repositories or Paseo projects yet" : "No repositories match your filters"}</Text><Notice theme={theme} text={catalog.total === 0 ? "Add or open a project in Paseo on this host, then refresh the library." : "Try a different name or path, or clear the workspace and project filters."} /></View>}
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, paddingTop: 12, borderTopWidth: 1, borderColor: theme.colors.border }}>
         <Notice theme={theme} text={catalog.filteredTotal === 0 ? "0 repositories" : `${catalog.offset + 1}–${catalog.offset + catalog.repositories.length} of ${catalog.filteredTotal} ${filtered ? "matches" : "repositories"}`} />

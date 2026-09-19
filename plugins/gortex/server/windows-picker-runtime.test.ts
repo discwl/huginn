@@ -47,7 +47,7 @@ test("an incompatible runtime on PATH does not mask a working standard installat
 });
 
 test("missing PowerShell, unavailable Forms and a noninteractive session get distinct guidance", async () => {
-  for (const [status, expected] of [["missing", /could not be started/], ["powershell_version", /PowerShell 7 is required/], ["windows_forms", /Windows Forms folder dialog is unavailable/], ["desktop", /signed-in Windows desktop session/]] as const) {
+  for (const [status, expected] of [["missing", /needs PowerShell 7 on this host\. Install it with: winget/], ["powershell_version", /older PowerShell/], ["windows_forms", /can't open the Windows folder dialog/], ["desktop", /signed-in Windows desktop session/]] as const) {
     const result = await findWindowsPickerRuntime({
       home, environment: {},
       run: async executable => executable !== "pwsh.exe" || status === "missing" ? missing() : JSON.stringify({ status }),
@@ -74,6 +74,6 @@ test("malformed and unexpected probe output is never reported as a usable runtim
     const result = await findWindowsPickerRuntime({ home, environment: {}, run: async () => output });
     assert.equal(result.available, false);
     assert.equal(result.executable, null);
-    assert.match(result.reason, /invalid response/);
+    assert.match(result.reason, /folder-picker check failed/);
   }
 });

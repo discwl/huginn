@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { GitInitControl } from "./git-init.tsx";
+import { ExclusionSuggestions } from "./exclusion-suggestions.tsx";
 import { metadataReadRpc, metadataPreviewRpc, metadataRepairRpc, metadataApplyRpc, metadataJobRpc, type MetadataPreview, type RepositoryFields } from "../shared/metadata-contracts.ts";
 import { metadataRepairState } from "../shared/metadata-repair.ts";
 import { MetadataChangePreview } from "./metadata-preview.tsx";
@@ -107,7 +109,16 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
             <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>{labels[key]}</Text>
             <TextInput accessibilityLabel={labels[key]} value={fields[key]} editable={!locked} maxLength={160} autoCapitalize="none" autoCorrect={false} onChangeText={value => { setDraft({ ...fields, [key]: value }); setPreview(null); }} placeholder="Inherit native default" placeholderTextColor={theme.colors.foregroundMuted} style={{ minHeight: 44, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 10, backgroundColor: theme.colors.surface0, paddingHorizontal: 12, color: theme.colors.foreground, fontSize: 14 }} />
           </View>)}
-        </> : <ExclusionEditor theme={theme} text={exclusionDraft} disabled={locked} onChange={text => { setExclusionDraft(text); setPreview(null); }} />}
+        </> : <>
+          <ExclusionEditor theme={theme} text={exclusionDraft} disabled={locked} onChange={text => { setExclusionDraft(text); setPreview(null); }} />
+          <ExclusionSuggestions host={host} theme={theme} path={path} disabled={locked} onApply={lines => {
+            setExclusionDraft(current => {
+              const existing = (current ?? "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+              return [...existing, ...lines.filter(line => !existing.includes(line))].join("\n");
+            });
+            setPreview(null);
+          }} />
+        </>}
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
           <Action title={busy ? "Checking…" : "Preview changes"} icon="Eye" theme={theme} disabled={locked} onPress={() => { void request(async () => { setPreview(await previewChange({ path, revision: current.revision, configured: fields, exclude: exclusionDraft === null ? undefined : parseExclusionLines(exclusionDraft) })); }); }} />
           <Action title="Cancel editing" theme={theme} disabled={locked} onPress={stopEditing} />
@@ -135,6 +146,7 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
       </>}
     </View>}
     <Action title="Refresh metadata" icon="RefreshCw" theme={theme} disabled={locked || editing || data.isFetching} onPress={() => { setRepairing(false); setPreview(null); void data.refetch(); }} />
+    <GitInitControl host={host} theme={theme} path={path} onChanged={onChanged} />
     <RepositoryUntrack host={host} theme={theme} path={path} disabled={busy || running || editing || preview !== null} onBusy={setUntracking} onChanged={onChanged} />
   </Card>;
 }

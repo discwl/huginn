@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { open, realpath, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { homedir } from "node:os";
 import type { TrackJob, TrackPreview } from "../shared/track-contracts.ts";
 import type { NativePort } from "./gortex-client.ts";
@@ -12,11 +12,17 @@ import { runProcess } from "./process-runner.ts";
 import { requireNativeCompatibility } from "../shared/native-compatibility.ts";
 
 export interface TrackPort extends Pick<NativePort, "assignments" | "info" | "version"> {
+  /** Read-only probe of the native track interface; throws when it is unsupported. */
+  trackSupport(path: string): Promise<void>;
   track(path: string): Promise<void>;
   refreshContexts(): Promise<void>;
 }
 type PreviewRecord = { preview: TrackPreview; fingerprint: string; job?: string };
 const message = (error: unknown) => error instanceof Error ? error.message : "Native tracking failed.";
+function isInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
 async function configDigest(path: string): Promise<string> {
   const file = await open(path, "r").catch(error => { if (error.code === "ENOENT") return null; throw error; });
   if (!file) return "absent";
@@ -54,28 +60,38 @@ export class RepositoryTrack {
   }
   private async snapshot(path: string) {
     const directory = await inspectProjectDirectory(path);
-    if (directory.state !== "untracked") throw new Error(directory.error ?? "A standalone Git repository is required.");
-    const root = directory.path;
+    if (directory.state !== "untracked") throw new Error(directory.error ?? "This folder cannot be indexed.");
+    const root = directory.path, git = directory.git !== false;
     if (sameRepositoryPath(root, homedir()) || sameRepositoryPath(root, dirname(root))) throw new Error("Tracking a home directory or filesystem root is not offered.");
-    // Verify the Git repository itself again for administration, rather than trusting the listing cache.
-    const gitRoot = (await runProcess("git", ["-C", root, "rev-parse", "--show-toplevel"], root, { timeoutMs: 5000, maxBytes: 65536 })).trimEnd();
-    if (/[\r\n]/.test(gitRoot) || !sameRepositoryPath(await realpath(gitRoot), root)) throw new Error("The Git repository root changed. Refresh the project before indexing.");
+    if (git) {
+      // Verify the Git repository itself again for administration, rather than trusting the listing cache.
+      const gitRoot = (await runProcess("git", ["-C", root, "rev-parse", "--show-toplevel"], root, { timeoutMs: 5000, maxBytes: 65536 })).trimEnd();
+      if (/[\r\n]/.test(gitRoot) || !sameRepositoryPath(await realpath(gitRoot), root)) throw new Error("The Git repository root changed. Refresh the project before indexing.");
+    }
     const [version, rows, globalDigest, localDigest, identity] = await Promise.all([
-      this.native.version(), this.native.assignments(), configDigest(this.configPath), configDigest(join(root, ".gortex.yaml")), stat(join(root, ".git")),
+      this.native.version(), this.native.assignments(), configDigest(this.configPath), configDigest(join(root, ".gortex.yaml")), stat(git ? join(root, ".git") : root),
     ]);
     requireNativeCompatibility(version);
     if (await this.registered(root, rows)) throw new Error("This repository is already tracked. Refresh the library to use its existing native index.");
+    // A plain folder can contain or sit inside tracked repositories; indexing both would duplicate their files.
+    for (const row of rows) {
+      let tracked: string;
+      try { tracked = await realpath(row.path); } catch { continue; }
+      if (isInside(tracked, root)) throw new Error(`This folder contains ${row.repo}, which Gortex already tracks. Index the individual repositories instead.`);
+      if (isInside(root, tracked)) throw new Error(`This folder is inside ${row.repo}, which Gortex already tracks.`);
+    }
     const name = basename(root);
     if (rows.some(row => row.repo.toLowerCase() === name.toLowerCase())) throw new Error("Another repository already uses this native name. Choose a distinct name with native Gortex tracking before continuing.");
     const fingerprint = createHash("sha256").update(JSON.stringify([version, root, globalDigest, localDigest, identity.dev, identity.ino, identity.birthtimeMs, [...rows].sort((a, b) => a.path.localeCompare(b.path))])).digest("hex");
-    return { path: root, name, fingerprint };
+    return { path: root, name, fingerprint, git };
   }
   async preview(path: string): Promise<TrackPreview> {
     if (this.closed) throw new Error("Plugin is closing. Reopen it before indexing.");
     const snapshot = await this.snapshot(path);
     if ([...this.jobs.values()].some(job => sameRepositoryPath(job.path, snapshot.path) && job.outcome === "uncertain")) throw new Error("An earlier tracking outcome is unverified. Reconcile the host catalog before retrying.");
-    const preview: TrackPreview = { id: randomUUID(), expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), path: snapshot.path, name: snapshot.name, warnings: [
-      "Adds this Git repository to Gortex’s native tracking configuration and requests indexing on the selected host.",
+    const preview: TrackPreview = { id: randomUUID(), expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), path: snapshot.path, name: snapshot.name, git: snapshot.git, warnings: [
+      snapshot.git ? "Adds this Git repository to Gortex’s native tracking configuration and requests indexing on the selected host."
+        : "This folder has no Git repository. Gortex indexes it for search, source and relationships, but branch, worktree and change-history features are unavailable, and there is no .gitignore to skip generated folders. Add exclusions afterwards in Repository settings, or initialize Git first.",
       "Gortex uses the repository’s native workspace, project and exclusion defaults. You can change them in Repository settings after tracking.",
       "Source files and Paseo workspaces stay in place. Indexing continues in the background.",
     ] };
@@ -143,6 +159,7 @@ export class RepositoryTrack {
       const snapshot = await this.snapshot(job.path);
       if (snapshot.fingerprint !== record.fingerprint) throw new Error("Repository identity or configuration changed after preview. No tracking request was sent; review a new preview.");
       if (this.closed) throw new Error("Plugin closed before tracking began. No request was sent.");
+      await this.native.trackSupport(job.path);
       job.stage = "tracking"; attempted = true;
       await this.native.track(job.path);
       job.stage = "verifying";
@@ -159,8 +176,18 @@ export class RepositoryTrack {
     } catch (error) {
       job.error = message(error); job.outcome = attempted ? "uncertain" : "failed";
       if (attempted) {
-        this.admin.stopWrites("Repository writes are paused because a tracking outcome is unverified. Reconcile the native host catalog before reloading the plugin to resume writes.");
-        try { job.registered = (await this.registered(job.path)) !== null; } catch { /* Unknown is not proof that a write failed. */ }
+        let row: NativeAssignment | null | undefined;
+        try { row = await this.registered(job.path); job.registered = row !== null; } catch { /* Unknown is not proof that a write failed. */ }
+        const code = (error as { code?: unknown } | null)?.code;
+        if (row) {
+          // The authoritative catalog confirms the write; only graph readiness remains to observe.
+          job.outcome = "indexing"; this.pendingContexts.set(job.id, row);
+        } else if (row === null && (code === "process_failed" || code === "process_unavailable")) {
+          // The command did not run or exited with a failure, and the catalog confirms nothing was registered.
+          job.outcome = "failed";
+        } else {
+          this.admin.stopWrites("Repository writes are paused because a tracking outcome is unverified. Reconcile the native host catalog before reloading the plugin to resume writes.");
+        }
       }
     } finally {
       if (attempted) this.invalidate();

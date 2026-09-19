@@ -161,11 +161,14 @@ export class GortexClient implements NativePort {
     return this.call(cwd, "workspace", { operation: "checkouts", arguments: { format: "json", max_bytes: 256000 } });
   }
 
+  async trackSupport(path: string): Promise<void> {
+    const help = await runProcess(this.binary, ["track", "--help"], path, { timeoutMs: 10000, maxBytes: 16384 });
+    requireTrackCliSupport(help);
+  }
+
   async track(path: string): Promise<void> {
     // Explicit CLI adapter for a new root: a repository-bound MCP session cannot admit it yet.
     // The caller reconciles the native catalog; stdout is not treated as an index receipt.
-    const help = await runProcess(this.binary, ["track", "--help"], path, { timeoutMs: 10000, maxBytes: 16384 });
-    requireTrackCliSupport(help);
     await runProcess(this.binary, ["track", path, "--no-progress"], path, { timeoutMs: 60000, maxBytes: 65536 });
   }
 

@@ -89,8 +89,10 @@ export class RepositoryConfig {
     const effective = effectiveFields(entry.path, configured, local);
     const warnings: string[] = [];
     let canRebuild = false;
-    try { canRebuild = (await lstat(join(canonical, ".git"))).isDirectory(); } catch { /* Plain folders and automatic worktrees need different admission contracts. */ }
-    if (!canRebuild) warnings.push("Index refresh from this editor is limited to a Git repository with its own .git directory. Worktree and plain-folder refresh is unavailable.");
+    // A standalone repository (.git directory) or a plain folder (no .git) can be refreshed; a worktree or submodule (.git file) cannot.
+    try { canRebuild = (await lstat(join(canonical, ".git"))).isDirectory(); }
+    catch (error) { canRebuild = (error as NodeJS.ErrnoException).code === "ENOENT"; }
+    if (!canRebuild) warnings.push("Index refresh from this editor is unavailable for a Git worktree or submodule, or when its .git entry cannot be read.");
     if (local.projects?.length) { canRebuild = false; warnings.push("This repository has per-file project mappings in .gortex.yaml; a single project value cannot describe that graph."); }
     const known = new Set(["path", "name", "workspace", "project", "ref", "exclude"]);
     const extra = { ref: entry.ref ?? null, exclude: entry.exclude ?? [], unknownKeys: Object.keys(entry).filter(key => !known.has(key)) };

@@ -4,6 +4,8 @@ import { pathSchema, repositorySchema } from "./models.ts";
 
 export const trackPreviewSchema = z.object({
   id: z.string().uuid(), expiresAt: z.string(), path: pathSchema, name: z.string(),
+  // False for a plain folder without Git; Gortex indexes it without branch, worktree or history features.
+  git: z.boolean(),
   warnings: z.array(z.string()),
 });
 export const trackJobSchema = z.object({

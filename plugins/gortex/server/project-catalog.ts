@@ -1,5 +1,5 @@
 import { lstat, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, normalize } from "node:path";
+import { dirname, isAbsolute, join, normalize } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { PaseoProject } from "../shared/catalog-browser.ts";
 import type { NativeAssignment, Repository } from "../shared/models.ts";
@@ -10,7 +10,21 @@ export function repositoryPathKey(path: string): string {
   const normalized = normalize(path);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
-export type ProjectDirectory = { path: string; state: "untracked" | "worktree" | "unsupported" | "unavailable"; error: string | null };
+/** `git` is false for a plain folder: no .git in the folder or any parent. Gortex tracks plain folders too. */
+export type ProjectDirectory = { path: string; state: "untracked" | "worktree" | "unsupported" | "unavailable"; error: string | null; git?: boolean };
+
+type GitControlStat = { isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean };
+/** Nearest folder at or above `path` containing a .git entry; null for a plain folder. Needs no Git executable. */
+export async function findEnclosingGit(path: string, probe: (path: string) => Promise<GitControlStat> = lstat): Promise<{ root: string; control: GitControlStat } | null> {
+  for (let current = path, depth = 0; depth < 128; depth++) {
+    const control = await probe(join(current, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT" || error.code === "ENOTDIR") return null; throw error; });
+    if (control) return { root: current, control };
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+  return null;
+}
 
 type ProjectDirectoryIo = {
   realpath(path: string): Promise<string>;
@@ -86,19 +100,19 @@ async function inspectDirectory(path: string, deadline: number, io: ProjectDirec
     if (!(await reads.run(deadline, () => io.stat(canonical))).isDirectory()) throw new Error("The project directory is unavailable.");
     let control = await reads.run(deadline, () => io.lstat(join(canonical, ".git"))).catch(error => { if (error.code === "ENOENT") return null; throw error; });
     if (!control) {
-      try {
-        const root = (await reads.run(deadline, () => io.runProcess("git", ["-C", canonical, "rev-parse", "--show-toplevel"], canonical, { timeoutMs: Math.max(1, Math.min(5000, deadline - performance.now())), maxBytes: 65536 }))).trimEnd();
-        if (!isAbsolute(root) || /[\r\n]/.test(root)) throw new Error("Invalid Git root response.");
-        canonical = await reads.run(deadline, () => io.realpath(root));
-        control = await reads.run(deadline, () => io.lstat(join(canonical, ".git")));
-      } catch (error) {
-        if (error instanceof DiscoveryTimeout) throw error;
-        return { path: canonical, state: "unsupported", error: "A Git repository root could not be verified. Check Git installation and folder access; plain-folder tracking is not offered." };
-      }
+      // A subfolder maps to its enclosing repository; with no .git anywhere above, it is a plain folder.
+      // Each parent probe rechecks the deadline, so an expired walk never continues in the background.
+      const enclosing = await reads.run(deadline, () => findEnclosingGit(dirname(canonical), path => {
+        if (performance.now() >= deadline) return Promise.reject(new DiscoveryTimeout());
+        return io.lstat(path);
+      }));
+      if (!enclosing) return { path: canonical, state: "untracked", error: null, git: false };
+      canonical = await reads.run(deadline, () => io.realpath(enclosing.root));
+      control = enclosing.control;
     }
     if (control.isFile() || control.isSymbolicLink()) return { path: canonical, state: "worktree", error: "This folder uses a Git worktree or submodule control path. It may already have an automatic Gortex view; ordinary dedicated tracking is not offered here." };
     if (!control.isDirectory()) throw new Error("Unsupported Git control path.");
-    return { path: canonical, state: "untracked", error: null };
+    return { path: canonical, state: "untracked", error: null, git: true };
   } catch (error) {
     return { path: canonical, state: "unavailable", error: error instanceof Error ? error.message : "The project directory could not be checked on this host." };
   }
@@ -144,7 +158,7 @@ export class ProjectCatalog {
       if (seen.has(key)) return;
       seen.add(key);
       merged.push({ repo: project.name, path: directory.path, workspace: "", project: "", source: "paseo-project" });
-      candidates.set(key, { name: project.name, path: directory.path, declaredWorkspace: "", declaredProject: "", assignmentSource: "paseo-project", workspaceId: null, projectId: null, graphName: null, origin: "paseo", state: directory.state, error: directory.error });
+      candidates.set(key, { name: project.name, path: directory.path, declaredWorkspace: "", declaredProject: "", assignmentSource: "paseo-project", workspaceId: null, projectId: null, graphName: null, origin: "paseo", state: directory.state, error: directory.error, ...(directory.git === undefined ? {} : { git: directory.git }) });
     };
     // Only the current batch can be pending. Once time expires, fill presentation rows without launching more IO.
     for (let start = 0; start < projects.length; start += 4) {

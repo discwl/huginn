@@ -23,6 +23,14 @@ import { RepositoryWorktrees } from "./server/repository-worktrees.ts";
 import { worktreesRpc } from "./shared/worktree-contracts.ts";
 
 import { hostTimeRpc } from "./shared/date-time.ts";
+import { AutoIndexer } from "./server/auto-index.ts";
+import { autoIndexActivityRpc } from "./shared/auto-index-contracts.ts";
+import { GitInitializer } from "./server/git-init.ts";
+import { gitInitRpc, gitStatusRpc } from "./shared/git-contracts.ts";
+import { ExclusionSuggester } from "./server/exclusion-suggester.ts";
+import { suggestJobRpc, suggestLatestRpc, suggestStartRpc } from "./shared/exclusion-suggest-contracts.ts";
+import { PluginUpdater } from "./server/plugin-updater.ts";
+import { pluginUpdateApplyRpc, pluginUpdateCheckRpc } from "./shared/plugin-update-contracts.ts";
 
 export default function contribute(server: PluginServerContext) {
   server.handle(hostTimeRpc, () => {
@@ -41,7 +49,7 @@ export default function contribute(server: PluginServerContext) {
   const worktrees = new RepositoryWorktrees(native);
   server.handle(worktreesRpc, ({ path, offset }) => worktrees.list(path, offset));
   const directories = new DirectoryBrowser();
-  server.registerSettings(preferences);
+  const settings = server.registerSettings(preferences);
   server.handle(catalogRpc, input => library.catalog(input.offset, input));
   server.handle(directoryRpc, input => directories.list(input));
   server.handle(inspectRpc, input => library.inspect(input.path));
@@ -52,6 +60,20 @@ export default function contribute(server: PluginServerContext) {
   const metadata = new RepositoryMetadata(native, undefined, () => library.close(), admin);
   const untrack = new RepositoryUntrack(native, undefined, () => library.close(), admin);
   const track = new RepositoryTrack(native, () => library.close(), admin);
+  const autoIndex = new AutoIndexer(track, metadata, async () => { const state = await settings.read(); return state.status === "ready" ? state.values : null; });
+  // Background work: lifecycle hooks have a 30-second budget, and a skipped or failed run is recorded, not thrown.
+  server.on("workspace.created", ({ workspace }) => { void autoIndex.handle(workspace); });
+  const git = new GitInitializer(() => library.close());
+  server.handle(gitStatusRpc, ({ path }) => git.status(path));
+  server.handle(gitInitRpc, ({ path }) => git.initialize(path));
+  const suggester = new ExclusionSuggester(metadata, async () => { const state = await settings.read(); return state.status === "ready" ? state.values.suggestionAgent : "claude/claude-sonnet-5"; });
+  server.handle(suggestStartRpc, ({ path }, { paseo }) => suggester.start(path, paseo));
+  server.handle(suggestJobRpc, ({ id }) => suggester.job(id));
+  server.handle(suggestLatestRpc, async ({ path }) => ({ job: await suggester.latestFor(path) }));
+  const pluginUpdater = new PluginUpdater();
+  server.handle(pluginUpdateCheckRpc, () => pluginUpdater.check());
+  server.handle(pluginUpdateApplyRpc, ({ target }) => pluginUpdater.apply(target));
+  server.handle(autoIndexActivityRpc, () => ({ records: autoIndex.activity() }));
   const updates = new GortexUpdates(undefined, () => library.close(), admin, effect => native.withMaintenance(effect));
   server.handle(updateStatusRpc, () => updates.status());
   server.handle(updateCheckRpc, () => updates.check());
@@ -69,5 +91,5 @@ export default function contribute(server: PluginServerContext) {
   server.handle(metadataRepairRpc, ({ path, revision }) => metadata.previewRepair(path, revision));
   server.handle(metadataApplyRpc, ({ id }) => metadata.apply(id));
   server.handle(metadataJobRpc, ({ id }) => metadata.job(id));
-  return async () => { directories.close(); nativePicker.close(); await Promise.all([metadata.close(), untrack.close(), track.close(), updates.close(), worktrees.close()]); library.close(); await native.close(); };
+  return async () => { directories.close(); nativePicker.close(); await Promise.all([suggester.close(), autoIndex.close(), metadata.close(), untrack.close(), track.close(), updates.close(), worktrees.close()]); library.close(); await native.close(); };
 }

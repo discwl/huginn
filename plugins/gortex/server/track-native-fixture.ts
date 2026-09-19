@@ -9,6 +9,7 @@ import { RepositoryTrack } from "./repository-track.ts";
 import { WorkspaceLibrary } from "./workspace-library.ts";
 import { runProcess } from "./process-runner.ts";
 
+const plain = process.argv.includes("plain");
 const root = await realpath(await mkdtemp(join(tmpdir(), "gx-track-")));
 for (const key of Object.keys(process.env)) if (/^(GORTEX_|XDG_|OPENAI_|ANTHROPIC_|AZURE_OPENAI_|OLLAMA_|AWS_|GEMINI_|GOOGLE_API_)/.test(key)) delete process.env[key];
 process.env.XDG_CONFIG_HOME = join(root, "config"); process.env.XDG_DATA_HOME = join(root, "data"); process.env.XDG_CACHE_HOME = join(root, "cache");
@@ -22,7 +23,8 @@ try {
   const configPath = join(configDir, "config.yaml");
   await writeFile(configPath, "repos: []\nembedding:\n  enabled: false\nmcp:\n  allow_embedded: false\n");
   const path = join(root, "new café repo"); await mkdir(path);
-  await runProcess("git", ["init", "-q", path], root);
+  // `plain` runs the same flow on a folder with no Git repository.
+  if (!plain) await runProcess("git", ["init", "-q", path], root);
   const source = "export function fixtureAnswer() { return 42; }\n";
   await writeFile(join(path, "answer.ts"), source);
   await writeFile(join(path, ".gortex.yaml"), "workspace: fixture-workspace\nproject: automation\nembedding:\n  enabled: false\nsemantic:\n  enabled: false\n");
@@ -57,7 +59,7 @@ try {
   assert.equal(refreshed.total, 1); assert.equal(refreshed.repositories[0].state, "resolved");
   assert.equal(await readFile(join(path, "answer.ts"), "utf8"), source);
   await assert.rejects(service.preview(path), /already tracked/i);
-  console.log("Native first-repository tracking, workspace/project defaults, searchable index, Unicode paths, duplicate prevention and source preservation passed.");
+  console.log((plain ? "[plain folder] " : "") + "Native first-repository tracking, workspace/project defaults, searchable index, Unicode paths, duplicate prevention and source preservation passed.");
 } finally {
   await service.close(); library.close(); await native.close();
   let stopped = !started;
