@@ -9,7 +9,7 @@ type HealthPort = {
 function healthError(error: unknown): string {
   const text = error instanceof Error ? error.message : "Gortex health is unavailable.";
   if (isBusyMessage(text)) return busyMessage;
-  return isWarmingUpMessage(text) ? "Gortex is starting up and still discovering checkouts. Health returns once it is ready." : text;
+  return isWarmingUpMessage(text) ? "Gortex is busy building or discovering a checkout, so it didn't answer the health request in time. This usually clears on its own; it happens when several agents or worktrees are active." : text;
 }
 
 export async function readHostHealth(native: HealthPort) {

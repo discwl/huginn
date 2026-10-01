@@ -24,7 +24,7 @@ export function isWarmingUpMessage(message: string): boolean {
   return retryable.some(pattern => pattern.test(message));
 }
 
-export const warmingUpMessage = "Gortex is still discovering this repository's checkouts after starting up. This clears on its own; refresh in a moment.";
+export const warmingUpMessage = "Gortex is busy building or discovering a checkout and didn't answer for this repository in time. This usually clears on its own; refresh in a moment.";
 
 /** Delays before each retry of a warming-up native request. */
 export const warmupRetryDelaysMs = [700, 1500, 2500, 4000, 6000];
