@@ -31,6 +31,8 @@ import { ExclusionSuggester } from "./server/exclusion-suggester.ts";
 import { suggestJobRpc, suggestLatestRpc, suggestStartRpc } from "./shared/exclusion-suggest-contracts.ts";
 import { PluginUpdater } from "./server/plugin-updater.ts";
 import { pluginUpdateApplyRpc, pluginUpdateCheckRpc } from "./shared/plugin-update-contracts.ts";
+import { GortexDiagnostics } from "./server/diagnostics.ts";
+import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc } from "./shared/diagnostics-contracts.ts";
 
 export default function contribute(server: PluginServerContext) {
   server.handle(hostTimeRpc, () => {
@@ -70,6 +72,11 @@ export default function contribute(server: PluginServerContext) {
   server.handle(suggestStartRpc, ({ path }, { paseo }) => suggester.start(path, paseo));
   server.handle(suggestJobRpc, ({ id }) => suggester.job(id));
   server.handle(suggestLatestRpc, async ({ path }) => ({ job: await suggester.latestFor(path) }));
+  const diagnostics = new GortexDiagnostics(native, admin, () => library.close());
+  server.handle(diagnosticsRunRpc, () => diagnostics.run());
+  server.handle(diagnosticsLatestRpc, () => ({ report: diagnostics.latest() }));
+  server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }) => diagnostics.repair(reportId, remedyId));
+  server.handle(diagnosticsRepairJobRpc, ({ id }) => diagnostics.job(id));
   const pluginUpdater = new PluginUpdater();
   server.handle(pluginUpdateCheckRpc, () => pluginUpdater.check());
   server.handle(pluginUpdateApplyRpc, ({ target }) => pluginUpdater.apply(target));
