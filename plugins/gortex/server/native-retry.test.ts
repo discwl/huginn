@@ -37,8 +37,17 @@ test("a repository still warming up explains the wait instead of showing native 
 
 test("host health describes a warming daemon rather than repeating its internal error", async () => {
   const report = await readHostHealth({ assignments: async () => [{ path: process.cwd() }], daemonHealth: async () => { throw new Error(warmup); } });
-  assert.equal(report.state, "unavailable");
+  assert.equal(report.state, "busy");
   assert.match(report.error!, /busy building or discovering a checkout/);
+  // A stall belongs to one checkout: the next repository can still carry the host-wide request.
+  const tried: string[] = [];
+  const fallback = await readHostHealth({
+    assignments: async () => [{ path: "C:/stalled" }, { path: "C:/fine" }],
+    daemonHealth: async path => { tried.push(path); if (path === "C:/stalled") throw new Error(warmup); return { ready: true } as never; },
+  });
+  assert.equal(fallback.state, "available"); assert.deepEqual(tried, ["C:/stalled", "C:/fine"]);
+  const full = await readHostHealth({ assignments: async () => [{ path: "C:/a" }], daemonHealth: async () => { throw new Error("MCP error -32002: MCP dispatcher is busy"); } });
+  assert.equal(full.state, "busy"); assert.match(full.error!, /as many requests as it allows/);
   const other = await readHostHealth({ assignments: async () => [{ path: process.cwd() }], daemonHealth: async () => { throw new Error("socket closed"); } });
   assert.equal(other.error, "socket closed");
 });

@@ -22,7 +22,8 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
   const report = useQuery({ queryKey: [host.id, "gortex", "host-health"], queryFn: () => read({}), retry: false, refetchInterval: 30000, refetchIntervalInBackground: false, refetchOnWindowFocus: false });
   const health = report.data?.health;
   const stale = report.isError || !!(health && Date.now() - Date.parse(health.ts) > 90000);
-  const state = health ? stale ? "Stale snapshot" : health.ready ? "Ready" : "Warming up" : report.isError || report.data?.error ? "Unavailable" : "Connecting";
+  const busy = !health && report.data?.state === "busy";
+  const state = health ? stale ? "Stale snapshot" : health.ready ? "Ready" : "Warming up" : busy ? "Busy" : report.isError || report.data?.error ? "Unavailable" : "Connecting";
   if (compact) return <View style={{ gap: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12, flexShrink: 1 }}>
@@ -32,7 +33,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
       </View>
       {onDetails && <Action theme={theme} title="View health" icon="ArrowUpRight" onPress={onDetails} />}
     </View>
-    {(report.error || report.data?.error) && <Notice theme={theme} error text={report.error?.message ?? report.data?.error ?? "Health is unavailable."} />}
+    {(report.error || report.data?.error) && <Notice theme={theme} error={!busy} text={report.error?.message ?? report.data?.error ?? "Health is unavailable."} />}
   </View>;
   return <Card theme={theme}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
@@ -45,7 +46,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
     </View>
     {!report.data && report.isFetching && <Notice theme={theme} text="Connecting to Gortex for a health snapshot…" />}
     {report.error && <Notice theme={theme} error text={`Health unavailable: ${report.error.message}`} />}
-    {report.data?.error && <Notice theme={theme} error text={report.data.error} />}
+    {report.data?.error && <Notice theme={theme} error={!busy} text={report.data.error} />}
     {health && <>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
         <Metric theme={theme} icon="Network" label="Graph nodes" value={health.graph_nodes.toLocaleString()} detail={`${health.tracked_repos} tracked ${health.tracked_repos === 1 ? "repository" : "repositories"}`} />

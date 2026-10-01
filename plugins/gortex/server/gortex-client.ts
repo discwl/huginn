@@ -140,13 +140,19 @@ export class GortexClient implements NativePort {
     const pending = this.healthRequests.get(key);
     if (pending) return pending;
     const request = (async () => {
-      const connection = await this.acquire(key);
-      try {
-        await connection.ready;
-        return await sampleDaemonHealth(connection.client);
-      } finally {
-        connection.active--;
-        if (!connection.client.transport && this.connections.get(key) === connection) this.connections.delete(key);
+      for (let attempt = 0; ; attempt++) {
+        const connection = await this.acquire(key);
+        try {
+          await connection.ready;
+          return await sampleDaemonHealth(connection.client);
+        } catch (error) {
+          const text = error instanceof Error ? error.message : "";
+          if (!isWarmingUpMessage(text) || attempt >= 2 || this.closed) throw error;
+          await delay(warmupRetryDelaysMs[attempt]);
+        } finally {
+          connection.active--;
+          if (!connection.client.transport && this.connections.get(key) === connection) this.connections.delete(key);
+        }
       }
     })().finally(() => { if (this.healthRequests.get(key) === request) this.healthRequests.delete(key); });
     this.healthRequests.set(key, request);
