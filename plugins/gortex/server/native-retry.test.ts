@@ -38,7 +38,7 @@ test("a repository still warming up explains the wait instead of showing native 
 test("host health describes a warming daemon rather than repeating its internal error", async () => {
   const report = await readHostHealth({ assignments: async () => [{ path: process.cwd() }], daemonHealth: async () => { throw new Error(warmup); } });
   assert.equal(report.state, "unavailable");
-  assert.match(report.error!, /starting up and still discovering/);
+  assert.match(report.error!, /busy building or discovering a checkout/);
   const other = await readHostHealth({ assignments: async () => [{ path: process.cwd() }], daemonHealth: async () => { throw new Error("socket closed"); } });
   assert.equal(other.error, "socket closed");
 });
