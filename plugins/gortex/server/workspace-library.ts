@@ -2,6 +2,7 @@ import { lstat, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
+import { busyMessage, isBusyMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
 import { symbolSchema, type Catalog, type Inspection, type NativeAssignment, type Repository, type RepositoryContext, type SearchPage } from "../shared/models.ts";
 import type { NativePort } from "./gortex-client.ts";
 import { NativeError } from "./native-response.ts";
@@ -15,7 +16,12 @@ import { catalogInputSchema, pageAssignments, type CatalogInput } from "../share
 const administrationReason = "New standalone Git repositories can be indexed after confirmation on supported Gortex hosts. Existing repository metadata is managed in Repository settings.";
 const searchResultSchema = z.object({ results: z.array(symbolSchema).max(50).nullable().transform(results => results ?? []), total: z.number().optional(), scope_note: z.string().optional(), next_cursor: z.string().optional().nullable(), truncated: z.boolean().optional(), fetch_escalated: z.boolean().optional() }).passthrough();
 function samePath(a: string, b: string): boolean { return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b; }
-function message(error: unknown): string { return error instanceof Error ? error.message : "Host operation failed."; }
+function message(error: unknown): string {
+  const text = error instanceof Error ? error.message : "Host operation failed.";
+  // Warm-up conditions are a wait, not a broken repository; the raw native text reads like a failure.
+  if (isBusyMessage(text)) return busyMessage;
+  return isWarmingUpMessage(text) ? warmingUpMessage : text;
+}
 
 export class WorkspaceLibrary {
   private native: NativePort;
@@ -24,6 +30,9 @@ export class WorkspaceLibrary {
   // Tokens originate in native search or verified relationship results. A client cannot turn symbol RPC into an arbitrary file reader.
   private selectedSymbols = new Map<string, number>();
   constructor(native: NativePort) { this.native = native; }
+
+  /** Last verified identity per path. Reused only while Gortex is warming up, so a busy discovery lane does not flip rows to unavailable. */
+  private resolved = new Map<string, Repository>();
 
   private async resolve(row: NativeAssignment): Promise<Repository> {
     const base = { name: row.repo, path: row.path, declaredWorkspace: row.workspace, declaredProject: row.project, assignmentSource: row.source };
@@ -37,8 +46,18 @@ export class WorkspaceLibrary {
       if (matches.length !== 1 || !matches[0].name) throw new NativeError("wrong_context", "Gortex resolved a different or ambiguous repository context. No substitute view was used.");
       // Configuration names can change while Gortex keeps an existing graph prefix.
       // Route by the native member identity, and display both identities to the user.
-      return { ...base, path, workspaceId: info.workspace, projectId: info.project, graphName: matches[0].name, state: "resolved", error: null };
-    } catch (error) { return { ...base, workspaceId: null, projectId: null, graphName: null, state: "unavailable", error: message(error) }; }
+      const repository: Repository = { ...base, path, workspaceId: info.workspace, projectId: info.project, graphName: matches[0].name, state: "resolved", error: null };
+      this.resolved.set(repositoryPathKey(path), repository);
+      return repository;
+    } catch (error) {
+      const text = message(error);
+      if (text === warmingUpMessage || text === busyMessage) {
+        // A verified identity from this session stays usable while discovery catches up.
+        const previous = this.resolved.get(repositoryPathKey(row.path));
+        if (previous) return { ...previous, error: text };
+      }
+      return { ...base, workspaceId: null, projectId: null, graphName: null, state: "unavailable", error: text };
+    }
   }
 
   async catalog(offset = 0, options: Partial<CatalogInput> = {}): Promise<Catalog> {

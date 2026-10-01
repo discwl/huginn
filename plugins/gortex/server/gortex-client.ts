@@ -2,6 +2,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { homedir } from "node:os";
 import { requireNativeCompatibility, requireTrackCliSupport } from "../shared/native-compatibility.ts";
+import { isWarmingUpMessage, warmupRetryDelaysMs } from "../shared/native-retry.ts";
+import { setTimeout as delay } from "node:timers/promises";
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import { nativeAssignmentSchema, nativeInfoSchema, type NativeAssignment, type NativeInfo } from "../shared/models.ts";
@@ -83,7 +85,19 @@ export class GortexClient implements NativePort {
     } finally { unlock(); }
   }
 
+  /** Retries only Gortex's own "retry this request" warm-up conditions; every other error surfaces immediately. */
   private async call(cwd: string, name: string, args: Record<string, unknown>, timeout = 20000): Promise<{ value: unknown; meta: unknown }> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.attempt(cwd, name, args, timeout); }
+      catch (error) {
+        const retriable = error instanceof NativeError && isWarmingUpMessage(error.message) && attempt < warmupRetryDelaysMs.length && !this.closed;
+        if (!retriable) throw error;
+        await delay(warmupRetryDelaysMs[attempt]);
+      }
+    }
+  }
+
+  private async attempt(cwd: string, name: string, args: Record<string, unknown>, timeout: number): Promise<{ value: unknown; meta: unknown }> {
     const key = await realpath(cwd);
     const connection = await this.acquire(key);
     let result: unknown;

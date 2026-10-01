@@ -7,6 +7,7 @@ import { Action, Badge, Card, Disclosure, Metric, Notice, SectionHeading } from 
 import { ReportedSavings } from "./reported-savings.tsx";
 import { GortexUpdatesPanel } from "./gortex-updates.tsx";
 import { PluginUpdatesPanel } from "./plugin-updates.tsx";
+import { DiagnosticsPanel } from "./diagnostics.tsx";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
 function uptime(seconds: number) { const minutes = Math.floor(seconds / 60); return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
@@ -62,7 +63,8 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
         <Notice theme={theme} text="Language servers start on demand. Runtime metrics describe the daemon on the selected host." />
       </Disclosure>
     </>}
-    <GortexUpdatesPanel host={host} theme={theme} />
+    <DiagnosticsPanel host={host} theme={theme} />
+      <GortexUpdatesPanel host={host} theme={theme} />
       <PluginUpdatesPanel host={host} theme={theme} />
     <ReportedSavings host={host} theme={theme} />
   </Card>;
