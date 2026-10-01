@@ -32,6 +32,8 @@ import { suggestJobRpc, suggestLatestRpc, suggestStartRpc } from "./shared/exclu
 import { PluginUpdater } from "./server/plugin-updater.ts";
 import { pluginUpdateApplyRpc, pluginUpdateCheckRpc } from "./shared/plugin-update-contracts.ts";
 import { GortexDiagnostics } from "./server/diagnostics.ts";
+import { hostSettingsIo, readHostSettings } from "./server/host-settings.ts";
+import { hostSettingsRpc } from "./shared/host-settings-contracts.ts";
 import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc } from "./shared/diagnostics-contracts.ts";
 
 export default function contribute(server: PluginServerContext) {
@@ -77,6 +79,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(diagnosticsLatestRpc, () => ({ report: diagnostics.latest() }));
   server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }) => diagnostics.repair(reportId, remedyId));
   server.handle(diagnosticsRepairJobRpc, ({ id }) => diagnostics.job(id));
+  const settingsIo = hostSettingsIo(() => native.assignments());
+  server.handle(hostSettingsRpc, () => readHostSettings(settingsIo));
   const pluginUpdater = new PluginUpdater();
   server.handle(pluginUpdateCheckRpc, () => pluginUpdater.check());
   server.handle(pluginUpdateApplyRpc, ({ target }) => pluginUpdater.apply(target));

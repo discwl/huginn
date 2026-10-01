@@ -40,7 +40,7 @@ function fixture(options: {
   let invalidations = 0;
   return { diagnostics: new GortexDiagnostics(native, new RepositoryAdminLock(), () => { invalidations++; }, cli), calls, invalidations: () => invalidations };
 }
-const check = (report: { checks: { id: string; state: string; detail: string }[] }, id: string) => report.checks.find(entry => entry.id === id)!;
+const check = (report: { checks: { id: string; state: string; detail: string; evidence: string | null }[] }, id: string) => report.checks.find(entry => entry.id === id)!;
 
 test("a healthy host reports ready with no repairs offered", async () => {
   const f = fixture();
@@ -90,6 +90,40 @@ test("a busy dispatcher is a capacity warning, not a broken host", async () => {
   assert.equal(check(report, "repositories").state, "warn");
   assert.match(check(report, "capacity").detail, /as many requests as it allows/);
   assert.deepEqual(report.remedies.map(remedy => remedy.id), ["recheck"]);
+});
+
+test("a busy dispatcher names who is connected and the Paseo restart that has cleared it", async () => {
+  const status = `${READY}\nMCP sessions:\n│ id │ client │ version │ connected │ cwd │\n│ a1 │ claude-code │ 2.1 │ 3m │ C:\\Repos\\app │\n│ a2 │ claude-code │ 2.1 │ 9m │ C:\\Repos\\api │\n│ a3 │ paseo-gortex │ 0.1.0 │ 1h │ C:\\Repos\\app │\n`;
+  const f = fixture({ status, info: () => { throw new Error("MCP error -32002: MCP dispatcher is busy"); } });
+  const capacity = check(await f.diagnostics.run(), "capacity");
+  assert.match(capacity.detail, /Restarting Paseo/);
+  assert.equal(capacity.evidence, "3 connected: 2 claude-code, 1 paseo-gortex");
+});
+
+test("stale worktree records are a warning with a prune offer that runs git worktree prune", async () => {
+  const gitCalls: string[] = [];
+  let pruned = false;
+  const diagnostics = new GortexDiagnostics(
+    { version: async () => "v", assignments: async () => rows, info: async path => ({ workspace: "w", project: "p", mode: "workspace", members: [{ name: "app", path }] }), reloadConfiguration: async () => {}, rebuildIndex: async () => {}, refreshContexts: async () => {} },
+    new RepositoryAdminLock(), () => {},
+    {
+      run: async args => args.join(" ") === "version" ? "gortex v0.64.5" : args.join(" ") === "daemon status" ? READY : reposJson(),
+      git: async (args, cwd) => {
+        gitCalls.push(`${cwd}: ${args.join(" ")}`);
+        if (args[1] === "prune") { pruned = true; return ""; }
+        return cwd === "C:/Repos/app" && !pruned ? "worktree C:/Repos/app\n\nworktree C:/gone\nprunable gitdir file points to non-existent location\n" : `worktree ${cwd}\n`;
+      },
+    },
+  );
+  const report = await diagnostics.run();
+  assert.equal(report.state, "degraded");
+  assert.equal(check(report, "worktrees").evidence, "app: 1");
+  const remedy = report.remedies.find(entry => entry.id === "prune:C:/Repos/app")!;
+  assert.equal(remedy.risk, "safe");
+  const job = await diagnostics.repair(report.id, remedy.id);
+  assert.equal(job.outcome, "fixed");
+  assert.ok(gitCalls.includes("C:/Repos/app: worktree prune"));
+  assert.equal(check(job.report!, "worktrees").state, "pass");
 });
 
 test("repositories that fail for another reason offer reload and a host-wide restart", async () => {

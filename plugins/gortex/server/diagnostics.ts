@@ -4,6 +4,7 @@ import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../s
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
 import { busyMessage, isBusyMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
+import { parseDaemonStatus, summarizeSessions, type DaemonSession } from "./daemon-status.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { runProcess } from "./process-runner.ts";
 
@@ -15,12 +16,19 @@ export interface DiagnosticsNative {
   rebuildIndex(path: string): Promise<void>;
   refreshContexts(): Promise<void>;
 }
-export interface DiagnosticsCli { run(args: string[], timeoutMs?: number): Promise<string> }
+export interface DiagnosticsCli {
+  run(args: string[], timeoutMs?: number): Promise<string>;
+  /** Optional: hosts without Git skip the worktree check. */
+  git?(args: string[], cwd: string): Promise<string>;
+}
 export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number }
 
-const REINDEX = "reindex:";
+const REINDEX = "reindex:", PRUNE = "prune:";
 const message = (error: unknown) => error instanceof Error ? error.message : "The check failed.";
-const hostCli: DiagnosticsCli = { run: (args, timeoutMs = 30_000) => runProcess("gortex", args, homedir(), { timeoutMs, maxBytes: 512 * 1024 }) };
+const hostCli: DiagnosticsCli = {
+  run: (args, timeoutMs = 30_000) => runProcess("gortex", args, homedir(), { timeoutMs, maxBytes: 512 * 1024 }),
+  git: (args, cwd) => runProcess("git", ["-C", cwd, ...args], cwd, { timeoutMs: 15_000, maxBytes: 256 * 1024 }),
+};
 const trim = (text: string, limit = 400) => { const value = text.replace(/\s+/g, " ").trim(); return value.length > limit ? `${value.slice(0, limit)}…` : value; };
 
 type RepoRow = { name?: unknown; path?: unknown; indexed?: unknown; stale?: unknown; last_indexed?: unknown };
@@ -74,16 +82,17 @@ export class GortexDiagnostics {
     // 2. The daemon process and its readiness.
     let status = "";
     let daemonRunning = false, daemonReady = false;
+    let sessions: DaemonSession[] = [];
     try {
       status = await this.cli.run(["daemon", "status"], 30_000);
-      daemonRunning = /\bpid\s+\d+/.test(status);
-      daemonReady = /\bstate\s+ready\b/.test(status);
-      const warming = /warming up/.test(status);
+      const parsed = parseDaemonStatus(status);
+      daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions;
+      const warming = parsed.warming;
       const state = daemonReady ? "pass" : daemonRunning ? "warn" : "fail";
       checks.push({
         id: "daemon", title: "Daemon", state,
         detail: daemonReady ? `Ready. ${trim(/ sessions\s+(\d+)/.exec(status)?.[0] ?? "", 60)}`.trim() : warming ? "Running but still warming up; queries can be refused until it finishes." : daemonRunning ? "Running, but not reporting a ready state." : "Not running on this host.",
-        evidence: trim(status.split(/\r?\n/).filter(line => /\b(pid|uptime|state|sessions)\b/.test(line)).join(" · "), 300),
+        evidence: trim(status.split(/\r?\n/).filter(line => /^\s*(pid|uptime|state|sessions)\s+\S/.test(line)).map(line => line.trim()).join(" · "), 300),
       });
       if (!daemonRunning) add({ id: "daemon-start", title: "Start the Gortex daemon", detail: "Runs gortex daemon start on this host.", risk: "safe", target: null });
       else if (!daemonReady) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again; warm-up usually clears on its own.", risk: "safe", target: null });
@@ -146,8 +155,28 @@ export class GortexDiagnostics {
       evidence: failures.length ? trim(failures.join(" · "), 400) : null,
     });
     if (busy) {
-      checks.push({ id: "capacity", title: "Request capacity", state: "warn", detail: busyMessage, evidence: null });
+      checks.push({
+        id: "capacity", title: "Request capacity", state: "warn",
+        detail: `${busyMessage} Restarting Paseo on this host has cleared this before, because it ends the agent sessions holding the slots; it also ends running agents.`,
+        evidence: sessions.length ? `${sessions.length} connected: ${summarizeSessions(sessions)}` : null,
+      });
       add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again once the current requests finish.", risk: "safe", target: null });
+    }
+    // 6. Worktrees whose folders are gone still cost Gortex discovery work on its single build lane.
+    if (this.cli.git) {
+      const stale: { repo: string; path: string; count: number }[] = [];
+      for (const row of probes) {
+        try {
+          const count = (await this.cli.git(["worktree", "list", "--porcelain"], row.path)).split(/\r?\n/).filter(line => line.startsWith("prunable")).length;
+          if (count > 0) stale.push({ repo: row.repo, path: row.path, count });
+        } catch { /* Not a Git repository, or Git is unavailable: nothing to prune. */ }
+      }
+      checks.push({
+        id: "worktrees", title: "Stale worktrees", state: stale.length ? "warn" : "pass",
+        detail: stale.length ? `${stale.reduce((sum, item) => sum + item.count, 0)} worktree record${stale.length === 1 && stale[0].count === 1 ? "" : "s"} point at folders that no longer exist.` : "No leftover worktree records.",
+        evidence: stale.length ? stale.map(item => `${item.repo}: ${item.count}`).join(" · ") : null,
+      });
+      for (const item of stale) add({ id: `${PRUNE}${item.path}`, title: `Prune stale worktrees in ${item.repo}`, detail: "Runs git worktree prune, which removes Git's records of worktrees whose folders are already gone. No files or branches are deleted.", risk: "safe", target: item.path });
     }
     if (warming) add({ id: "recheck", title: "Wait and re-check", detail: warmingUpMessage, risk: "safe", target: null });
     if (failures.length && !busy && !warming) {
@@ -195,6 +224,13 @@ export class GortexDiagnostics {
         case remedy.id === "daemon-start": job.steps.push(trim(await this.cli.run(["daemon", "start"], 180_000)) || "Started the daemon."); break;
         case remedy.id === "daemon-reload": await this.native.reloadConfiguration(); job.steps.push("Reloaded Gortex configuration."); break;
         case remedy.id === "daemon-restart": job.steps.push(trim(await this.cli.run(["daemon", "restart"], 180_000)) || "Restarted the daemon."); break;
+        case remedy.id.startsWith(PRUNE): {
+          const path = remedy.target ?? remedy.id.slice(PRUNE.length);
+          if (!this.cli.git) throw new Error("Git is unavailable on this host.");
+          await this.cli.git(["worktree", "prune"], path);
+          job.steps.push(`Pruned stale worktree records in ${path}.`);
+          break;
+        }
         case remedy.id.startsWith(REINDEX): {
           const path = remedy.target ?? remedy.id.slice(REINDEX.length);
           await this.native.rebuildIndex(path);
