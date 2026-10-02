@@ -37,6 +37,15 @@ export function parseDaemonStatus(text: string): DaemonStatus {
   };
 }
 
+/** Seconds from Gortex's uptime text ("9s", "14m24s", "5d23h"); null when it is absent or unrecognized. */
+export function uptimeSeconds(uptime: string | null): number | null {
+  if (!uptime) return null;
+  const units: Record<string, number> = { d: 86400, h: 3600, m: 60, s: 1 };
+  let total = 0, matched = "";
+  for (const [part, value, unit] of uptime.matchAll(/(\d+)([dhms])/g)) { total += Number(value) * units[unit]; matched += part; }
+  return matched && matched === uptime.trim() ? total : null;
+}
+
 /** "3 claude-code, 2 paseo-gortex" — who is holding Gortex's request slots. */
 export function summarizeSessions(sessions: DaemonSession[]): string {
   const counts = new Map<string, number>();

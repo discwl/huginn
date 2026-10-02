@@ -29,7 +29,8 @@ async function fixture() {
   return { root, path, configPath, rows, native, lock, service, writes: () => writes, invalidations: () => invalidations, close: async () => { await service.close(); await rm(root, { recursive: true, force: true }); } };
 }
 async function finish(service: RepositoryTrack, id: string) {
-  for (let i = 0; i < 200; i++) { const job = service.job(id); if (job.stage === "done") return job; await delay(10); }
+  // The job runs real Git; a loaded host needs more than a couple of seconds.
+  for (let i = 0; i < 1500; i++) { const job = service.job(id); if (job.stage === "done") return job; await delay(10); }
   throw new Error("Tracking job did not finish");
 }
 

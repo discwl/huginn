@@ -4,7 +4,7 @@ import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../s
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
 import { busyMessage, isBusyMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
-import { parseDaemonStatus, summarizeSessions, type DaemonSession } from "./daemon-status.ts";
+import { parseDaemonStatus, summarizeSessions, uptimeSeconds, type DaemonSession } from "./daemon-status.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { runProcess } from "./process-runner.ts";
 
@@ -12,6 +12,8 @@ export interface DiagnosticsNative {
   version(): Promise<string>;
   assignments(): Promise<NativeAssignment[]>;
   info(path: string): Promise<NativeInfo>;
+  /** Optional single-attempt probe; diagnostics report the present state rather than waiting out a stall. */
+  infoOnce?(path: string): Promise<NativeInfo>;
   reloadConfiguration(): Promise<void>;
   rebuildIndex(path: string): Promise<void>;
   refreshContexts(): Promise<void>;
@@ -24,6 +26,8 @@ export interface DiagnosticsCli {
 export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number }
 
 const REINDEX = "reindex:", PRUNE = "prune:";
+// Warm-up after a start is normally seconds; past this, a discovery failure on every repository is a wedge.
+const STUCK_AFTER_SECONDS = 300;
 const message = (error: unknown) => error instanceof Error ? error.message : "The check failed.";
 const hostCli: DiagnosticsCli = {
   run: (args, timeoutMs = 30_000) => runProcess("gortex", args, homedir(), { timeoutMs, maxBytes: 512 * 1024 }),
@@ -79,14 +83,18 @@ export class GortexDiagnostics {
       return this.finish(started, checks, [...remedies.values()]);
     }
 
+    // Slow on a struggling daemon, so it runs alongside the checks below and is awaited where it is reported.
+    const catalog = this.cli.run(["repos", "--json"], 30_000).then(output => ({ output, error: null as unknown }), error => ({ output: "", error }));
+
     // 2. The daemon process and its readiness.
     let status = "";
     let daemonRunning = false, daemonReady = false;
     let sessions: DaemonSession[] = [];
+    let uptime: number | null = null;
     try {
       status = await this.cli.run(["daemon", "status"], 30_000);
       const parsed = parseDaemonStatus(status);
-      daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions;
+      daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions; uptime = uptimeSeconds(parsed.uptime);
       const warming = parsed.warming;
       const state = daemonReady ? "pass" : daemonRunning ? "warn" : "fail";
       checks.push({
@@ -113,7 +121,8 @@ export class GortexDiagnostics {
     // 4. Index state per repository, from Gortex's own catalog.
     let repoRows: RepoRow[] = [];
     try {
-      const output = await this.cli.run(["repos", "--json"], 30_000);
+      const { output, error: catalogError } = await catalog;
+      if (catalogError) throw catalogError;
       const parsed: unknown = JSON.parse(output.slice(output.indexOf("[")));
       repoRows = Array.isArray(parsed) ? parsed as RepoRow[] : [];
       const unindexed = repoRows.filter(row => row.indexed === false);
@@ -138,22 +147,31 @@ export class GortexDiagnostics {
     // 5. Per-repository identity: what fails first when an agent starts in a repo.
     const probes = rows.slice(0, this.maxRepositories);
     const failures: string[] = [];
-    let busy = false, warming = false;
-    for (const row of probes) {
-      try { await this.native.info(row.path); }
-      catch (error) {
-        const text = message(error);
+    let busy = false, warming = false, discoveryFailures = 0;
+    // Six at a time: each probe retries a busy Gortex for several seconds, and one at a time took minutes.
+    for (let start = 0; start < probes.length; start += 6) {
+      const results = await Promise.all(probes.slice(start, start + 6).map(row => (this.native.infoOnce?.(row.path) ?? this.native.info(row.path)).then(() => null, error => ({ row, text: message(error) }))));
+      for (const failure of results) {
+        if (!failure) continue;
+        const { row, text } = failure;
         if (isBusyMessage(text)) { busy = true; failures.push(`${row.repo}: refused, dispatcher busy`); }
-        else if (isWarmingUpMessage(text)) { warming = true; failures.push(`${row.repo}: still discovering checkouts`); }
+        else if (isWarmingUpMessage(text)) { warming = true; discoveryFailures++; failures.push(`${row.repo}: checkout discovery pending`); }
         else failures.push(`${row.repo}: ${trim(text, 120)}`);
       }
     }
+    // A daemon that has been ready for minutes yet refuses every repository with a discovery error is not
+    // warming up: its checkout discovery is wedged, and waiting never clears it. Only a restart does.
+    const stuck = daemonReady && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probes.length > 0 && discoveryFailures === probes.length;
+    if (stuck) warming = false;
     checks.push({
       id: "repositories", title: "Repository access",
-      state: failures.length === 0 ? "pass" : busy || warming ? "warn" : "fail",
-      detail: failures.length === 0 ? `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.` : `${failures.length} of ${probes.length} did not answer.`,
+      state: failures.length === 0 ? "pass" : stuck ? "fail" : busy || warming ? "warn" : "fail",
+      detail: failures.length === 0 ? `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.`
+        : stuck ? `Gortex reports ready, but checkout discovery fails for all ${probes.length} ${probes.length === 1 ? "repository" : "repositories"}. It is stuck, not warming up: agents cannot read or edit through Gortex until the daemon restarts.`
+        : `${failures.length} of ${probes.length} did not answer.`,
       evidence: failures.length ? trim(failures.join(" · "), 400) : null,
     });
+    if (stuck) add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart, which clears the stuck checkout discovery. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
     if (busy) {
       checks.push({
         id: "capacity", title: "Request capacity", state: "warn",
@@ -165,12 +183,10 @@ export class GortexDiagnostics {
     // 6. Worktrees whose folders are gone still cost Gortex discovery work on its single build lane.
     if (this.cli.git) {
       const stale: { repo: string; path: string; count: number }[] = [];
-      for (const row of probes) {
-        try {
-          const count = (await this.cli.git(["worktree", "list", "--porcelain"], row.path)).split(/\r?\n/).filter(line => line.startsWith("prunable")).length;
-          if (count > 0) stale.push({ repo: row.repo, path: row.path, count });
-        } catch { /* Not a Git repository, or Git is unavailable: nothing to prune. */ }
-      }
+      const git = this.cli.git;
+      const counts = await Promise.all(probes.map(row => git(["worktree", "list", "--porcelain"], row.path)
+        .then(output => output.split(/\r?\n/).filter(line => line.startsWith("prunable")).length, () => 0 /* Not a Git repository, or Git is unavailable: nothing to prune. */)));
+      probes.forEach((row, index) => { if (counts[index] > 0) stale.push({ repo: row.repo, path: row.path, count: counts[index] }); });
       checks.push({
         id: "worktrees", title: "Stale worktrees", state: stale.length ? "warn" : "pass",
         detail: stale.length ? `${stale.reduce((sum, item) => sum + item.count, 0)} worktree record${stale.length === 1 && stale[0].count === 1 ? "" : "s"} point at folders that no longer exist.` : "No leftover worktree records.",
@@ -179,7 +195,7 @@ export class GortexDiagnostics {
       for (const item of stale) add({ id: `${PRUNE}${item.path}`, title: `Prune stale worktrees in ${item.repo}`, detail: "Runs git worktree prune, which removes Git's records of worktrees whose folders are already gone. No files or branches are deleted.", risk: "safe", target: item.path });
     }
     if (warming) add({ id: "recheck", title: "Wait and re-check", detail: warmingUpMessage, risk: "safe", target: null });
-    if (failures.length && !busy && !warming) {
+    if (failures.length && !busy && !warming && !stuck) {
       add({ id: "daemon-reload", title: "Reload Gortex configuration", detail: "Runs gortex daemon reload, which re-reads config.yaml and picks up added or removed repositories without a restart.", risk: "safe", target: null });
       add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
     }
