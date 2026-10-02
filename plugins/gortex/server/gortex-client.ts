@@ -126,6 +126,14 @@ export class GortexClient implements NativePort {
     return decodeNativeResult(result);
   }
 
+  /** One attempt, no warm-up retries: for health checks that need the present state, not an eventual answer. */
+  async infoOnce(cwd: string): Promise<NativeInfo> {
+    const result = await this.attempt(cwd, "workspace", { operation: "info", arguments: { format: "json" } }, 20000);
+    const parsed = nativeInfoSchema.safeParse(result.value);
+    if (!parsed.success) throw new NativeError("identity_shape", "Unsupported native context identity response.");
+    return parsed.data;
+  }
+
   async info(cwd: string): Promise<NativeInfo> {
     const result = await this.call(cwd, "workspace", { operation: "info", arguments: { format: "json" } });
     const parsed = nativeInfoSchema.safeParse(result.value);

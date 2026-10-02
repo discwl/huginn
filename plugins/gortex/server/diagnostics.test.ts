@@ -49,7 +49,8 @@ test("a healthy host reports ready with no repairs offered", async () => {
   assert.deepEqual(report.remedies, []);
   assert.equal(check(report, "daemon").state, "pass");
   assert.equal(check(report, "repositories").state, "pass");
-  assert.deepEqual(f.calls, ["version", "daemon status", "repos --json"]);
+  // The catalog read starts early and runs alongside the daemon check; only the set of commands is fixed.
+  assert.deepEqual([...f.calls].sort(), ["daemon status", "repos --json", "version"]);
 });
 
 test("a missing executable fails immediately without probing further", async () => {
@@ -124,6 +125,30 @@ test("stale worktree records are a warning with a prune offer that runs git work
   assert.equal(job.outcome, "fixed");
   assert.ok(gitCalls.includes("C:/Repos/app: worktree prune"));
   assert.equal(check(job.report!, "worktrees").state, "pass");
+});
+
+const discoveryPending = "Gortex rejected the request. Gortex said: view_building: automatic checkout discovery is still pending; retry this request: indexer: checkout mutation lane is busy; retry: selected checkout discovery is pending: context deadline exceeded";
+
+test("a long-running ready daemon that refuses every repository is stuck and offers a restart", async () => {
+  const stuckStatus = " pid 26804\n uptime    5d23h\n state     ready (warmup 21s)\n sessions  22\n";
+  const f = fixture({ status: stuckStatus, info: () => { throw new Error(discoveryPending); } });
+  const report = await f.diagnostics.run();
+  assert.equal(report.state, "broken");
+  assert.equal(check(report, "repositories").state, "fail");
+  assert.match(check(report, "repositories").detail, /stuck, not warming up/);
+  assert.deepEqual(report.remedies.map(remedy => remedy.id), ["daemon-restart"]);
+  assert.equal(report.remedies[0].risk, "host-wide");
+});
+
+test("the same refusals on a just-started daemon, or on only some repositories, stay a wait", async () => {
+  const fresh = fixture({ status: " pid 1\n uptime    40s\n state     ready (warmup 21s)\n", info: () => { throw new Error(discoveryPending); } });
+  const freshReport = await fresh.diagnostics.run();
+  assert.equal(check(freshReport, "repositories").state, "warn");
+  assert.deepEqual(freshReport.remedies.map(remedy => remedy.id), ["recheck"]);
+  const partial = fixture({ status: " pid 1\n uptime    2h10m\n state     ready (warmup 21s)\n", info: path => { if (path.endsWith("api")) throw new Error(discoveryPending); } });
+  const partialReport = await partial.diagnostics.run();
+  assert.equal(check(partialReport, "repositories").state, "warn");
+  assert.ok(!partialReport.remedies.some(remedy => remedy.id === "daemon-restart"));
 });
 
 test("repositories that fail for another reason offer reload and a host-wide restart", async () => {

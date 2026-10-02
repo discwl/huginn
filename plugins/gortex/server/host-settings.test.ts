@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pinnedWorkers, readHostSettings, type HostSettingsIo } from "./host-settings.ts";
-import { parseDaemonStatus, summarizeSessions } from "./daemon-status.ts";
+import { parseDaemonStatus, summarizeSessions, uptimeSeconds } from "./daemon-status.ts";
 import type { NativeAssignment } from "../shared/models.ts";
 
 const STATUS = ` daemon    v0.64.5+3310720
@@ -41,6 +41,11 @@ test("daemon status text is parsed into fields and sessions; unknown layouts sta
   const empty = parseDaemonStatus("something else entirely");
   assert.equal(empty.running, false); assert.equal(empty.ready, false); assert.deepEqual(empty.sessions, []);
   assert.equal(parseDaemonStatus(" pid 1\n state warming up (socket reachable)\n").warming, true);
+});
+
+test("uptime text converts to seconds; unrecognized text stays unknown", () => {
+  assert.equal(uptimeSeconds("9s"), 9); assert.equal(uptimeSeconds("14m24s"), 864); assert.equal(uptimeSeconds("5d23h"), 514800);
+  for (const text of [null, "", "soon", "5 days"]) assert.equal(uptimeSeconds(text), null);
 });
 
 test("index.workers is read only from a repository's .gortex.yaml", () => {
