@@ -27,4 +27,4 @@ export function isWarmingUpMessage(message: string): boolean {
 export const warmingUpMessage = "Gortex is busy building or discovering a checkout and didn't answer for this repository in time. This usually clears on its own; refresh in a moment.";
 
 /** Delays before each retry of a warming-up native request. */
-export const warmupRetryDelaysMs = [700, 1500, 2500, 4000, 6000];
+export const warmupRetryDelaysMs = [300, 700, 1500, 3000, 6000];

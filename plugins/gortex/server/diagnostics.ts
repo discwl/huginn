@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../shared/diagnostics-contracts.ts";
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
@@ -23,11 +25,15 @@ export interface DiagnosticsCli {
   /** Optional: hosts without Git skip the worktree check. */
   git?(args: string[], cwd: string): Promise<string>;
 }
-export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number }
+export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number; clock?: () => number; wait?: (ms: number) => Promise<unknown> }
 
 const REINDEX = "reindex:", PRUNE = "prune:";
 // Warm-up after a start is normally seconds; past this, a discovery failure on every repository is a wedge.
 const STUCK_AFTER_SECONDS = 300;
+// Gortex allows 250 ms for two Git commands; a single start slower than this leaves no headroom.
+const SLOW_GIT_MS = 100;
+// A refused first request is retried inside the 5 seconds Gortex keeps its finished Git check.
+const PROBE_ATTEMPTS = 5, PROBE_RETRY_MS = 400;
 const message = (error: unknown) => error instanceof Error ? error.message : "The check failed.";
 const hostCli: DiagnosticsCli = {
   run: (args, timeoutMs = 30_000) => runProcess("gortex", args, homedir(), { timeoutMs, maxBytes: 512 * 1024 }),
@@ -48,6 +54,8 @@ export class GortexDiagnostics {
   private invalidate: () => void;
   private maxRepositories: number;
   private now: () => number;
+  private clock: () => number;
+  private wait: (ms: number) => Promise<unknown>;
   private reports = new Map<string, DiagnosticsReport>();
   private jobs = new Map<string, RepairJob>();
   private latestId: string | null = null;
@@ -57,6 +65,22 @@ export class GortexDiagnostics {
     this.native = native; this.cli = cli; this.admin = admin; this.invalidate = invalidate;
     this.maxRepositories = options.maxRepositories ?? 12;
     this.now = options.now ?? Date.now;
+    this.clock = options.clock ?? (() => performance.now());
+    this.wait = options.wait ?? (ms => delay(ms));
+  }
+
+  /** One repository, the way an agent meets it: a refused first request is repeated right away. */
+  private async probe(row: NativeAssignment): Promise<{ ok: true; row: NativeAssignment; attempts: number } | { ok: false; row: NativeAssignment; text: string }> {
+    let text = "";
+    for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
+      try { await (this.native.infoOnce?.(row.path) ?? this.native.info(row.path)); return { ok: true, row, attempts: attempt }; }
+      catch (error) {
+        text = message(error);
+        if (!isWarmingUpMessage(text) || isBusyMessage(text) || attempt === PROBE_ATTEMPTS) break;
+        await this.wait(PROBE_RETRY_MS);
+      }
+    }
+    return { ok: false, row, text };
   }
 
   latest(): DiagnosticsReport | null { return this.latestId ? this.reports.get(this.latestId) ?? null : null; }
@@ -146,32 +170,56 @@ export class GortexDiagnostics {
 
     // 5. Per-repository identity: what fails first when an agent starts in a repo.
     const probes = rows.slice(0, this.maxRepositories);
-    const failures: string[] = [];
+    // Gortex runs Git before it answers a request and allows that 250 ms; slow process starts on the host
+    // (CPU load, antivirus) make first requests fail with "checkout discovery is pending".
+    let gitMs: number | null = null;
+    if (this.cli.git && probes.length) {
+      const git = this.cli.git, samples: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const began = this.clock();
+        try { await git(["rev-parse", "--git-dir"], probes[0].path); samples.push(this.clock() - began); } catch { break; }
+      }
+      if (samples.length === 3) {
+        gitMs = Math.round(samples.sort((a, b) => a - b)[1]);
+        const slow = gitMs > SLOW_GIT_MS;
+        checks.push({
+          id: "git", title: "Git speed", state: slow ? "warn" : "pass",
+          detail: slow ? `Git takes about ${gitMs} ms to start on this host. Gortex runs two Git commands before answering and allows 250 ms in total, so first requests fail with "checkout discovery is pending". The usual causes are other processes using the CPU, or antivirus scanning each process start. Restarting Gortex does not help.`
+            : `Git starts in about ${gitMs} ms.`,
+          evidence: `samples: ${samples.map(value => `${Math.round(value)} ms`).join(", ")}`,
+        });
+      }
+    }
+    const gitSlow = gitMs !== null && gitMs > SLOW_GIT_MS;
+
+    const failures: string[] = [], retried: string[] = [];
     let busy = false, warming = false, discoveryFailures = 0;
-    // Six at a time: each probe retries a busy Gortex for several seconds, and one at a time took minutes.
     for (let start = 0; start < probes.length; start += 6) {
-      const results = await Promise.all(probes.slice(start, start + 6).map(row => (this.native.infoOnce?.(row.path) ?? this.native.info(row.path)).then(() => null, error => ({ row, text: message(error) }))));
-      for (const failure of results) {
-        if (!failure) continue;
-        const { row, text } = failure;
+      const results = await Promise.all(probes.slice(start, start + 6).map(row => this.probe(row)));
+      for (const result of results) {
+        if (result.ok) { if (result.attempts > 1) retried.push(result.row.repo); continue; }
+        const { row, text } = result;
         if (isBusyMessage(text)) { busy = true; failures.push(`${row.repo}: refused, dispatcher busy`); }
         else if (isWarmingUpMessage(text)) { warming = true; discoveryFailures++; failures.push(`${row.repo}: checkout discovery pending`); }
         else failures.push(`${row.repo}: ${trim(text, 120)}`);
       }
     }
-    // A daemon that has been ready for minutes yet refuses every repository with a discovery error is not
-    // warming up: its checkout discovery is wedged, and waiting never clears it. Only a restart does.
-    const stuck = daemonReady && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probes.length > 0 && discoveryFailures === probes.length;
+    // Stuck means: ready for minutes, Git is fast, and every repository still refuses after quick retries.
+    // A slow Git explains the same refusals without anything being wedged, and a restart would not help.
+    const stuck = !gitSlow && daemonReady && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probes.length > 0 && discoveryFailures === probes.length;
     if (stuck) warming = false;
     checks.push({
       id: "repositories", title: "Repository access",
-      state: failures.length === 0 ? "pass" : stuck ? "fail" : busy || warming ? "warn" : "fail",
-      detail: failures.length === 0 ? `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.`
-        : stuck ? `Gortex reports ready, but checkout discovery fails for all ${probes.length} ${probes.length === 1 ? "repository" : "repositories"}. It is stuck, not warming up: agents cannot read or edit through Gortex until the daemon restarts.`
-        : `${failures.length} of ${probes.length} did not answer.`,
-      evidence: failures.length ? trim(failures.join(" · "), 400) : null,
+      state: failures.length === 0 ? retried.length ? "warn" : "pass" : stuck ? "fail" : busy || warming ? "warn" : "fail",
+      detail: failures.length === 0
+        ? retried.length ? `All ${probes.length} answer, but ${retried.length} only on a retry. Agents can see "checkout discovery is pending" on a first request; repeating the request right away works.`
+          : `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.`
+        : stuck ? `Gortex reports ready${gitMs === null ? "" : " and Git is fast"}, but checkout discovery fails for all ${probes.length} ${probes.length === 1 ? "repository" : "repositories"} even on quick retries. It looks stuck rather than busy.`
+        : `${failures.length} of ${probes.length} did not answer, even on quick retries.`,
+      evidence: failures.length ? trim(failures.join(" · "), 400) : retried.length ? `needed a retry: ${retried.join(", ")}` : null,
     });
-    if (stuck) add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart, which clears the stuck checkout discovery. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
+    if (stuck) add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
+    if (!stuck && (retried.length || (warming && gitSlow))) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again. If Git is slow, free up the CPU or check antivirus first.", risk: "safe", target: null });
     if (busy) {
       checks.push({
         id: "capacity", title: "Request capacity", state: "warn",
