@@ -38,7 +38,7 @@ function fixture(options: {
     refreshContexts: async () => {},
   };
   let invalidations = 0;
-  return { diagnostics: new GortexDiagnostics(native, new RepositoryAdminLock(), () => { invalidations++; }, cli), calls, invalidations: () => invalidations };
+  return { diagnostics: new GortexDiagnostics(native, new RepositoryAdminLock(), () => { invalidations++; }, cli, { wait: async () => {} }), calls, invalidations: () => invalidations };
 }
 const check = (report: { checks: { id: string; state: string; detail: string; evidence: string | null }[] }, id: string) => report.checks.find(entry => entry.id === id)!;
 
@@ -135,9 +135,38 @@ test("a long-running ready daemon that refuses every repository is stuck and off
   const report = await f.diagnostics.run();
   assert.equal(report.state, "broken");
   assert.equal(check(report, "repositories").state, "fail");
-  assert.match(check(report, "repositories").detail, /stuck, not warming up/);
+  assert.match(check(report, "repositories").detail, /looks stuck rather than busy/);
   assert.deepEqual(report.remedies.map(remedy => remedy.id), ["daemon-restart"]);
   assert.equal(report.remedies[0].risk, "host-wide");
+});
+
+test("slow Git explains the refusals: no stuck verdict and no restart is offered", async () => {
+  // Each Git call advances the clock by 600 ms: far past what Gortex allows for its checkout check.
+  let clock = 0;
+  const diagnostics = new GortexDiagnostics(
+    { version: async () => "v", assignments: async () => rows, info: async () => { throw new Error(discoveryPending); }, reloadConfiguration: async () => {}, rebuildIndex: async () => {}, refreshContexts: async () => {} },
+    new RepositoryAdminLock(), () => {},
+    { run: async args => args.join(" ") === "version" ? "gortex v0.64.5" : args.join(" ") === "daemon status" ? " pid 26804\n uptime    5d23h\n state     ready (warmup 21s)\n" : reposJson(), git: async args => { if (args[0] === "rev-parse") clock += 600; return ""; } },
+    { wait: async () => {}, clock: () => clock },
+  );
+  const report = await diagnostics.run();
+  assert.equal(check(report, "git").state, "warn");
+  assert.match(check(report, "git").detail, /about 600 ms.*Restarting Gortex does not help/);
+  assert.equal(check(report, "repositories").state, "warn");
+  assert.ok(!report.remedies.some(remedy => remedy.id === "daemon-restart"), "a restart cannot fix a slow host");
+  assert.ok(report.remedies.some(remedy => remedy.id === "recheck"));
+});
+
+test("a repository that answers on a quick retry is a warning, not a failure", async () => {
+  const seen = new Map<string, number>();
+  const f = fixture({ status: " pid 1\n uptime    2h10m\n state     ready (warmup 21s)\n", info: path => { const n = (seen.get(path) ?? 0) + 1; seen.set(path, n); if (path.endsWith("api") && n < 3) throw new Error(discoveryPending); } });
+  const report = await f.diagnostics.run();
+  assert.equal(report.state, "degraded");
+  assert.equal(check(report, "repositories").state, "warn");
+  assert.match(check(report, "repositories").detail, /1 only on a retry/);
+  assert.equal(check(report, "repositories").evidence, "needed a retry: api");
+  assert.equal(seen.get("C:/Repos/api"), 3);
+  assert.deepEqual(report.remedies.map(remedy => remedy.id), ["recheck"]);
 });
 
 test("the same refusals on a just-started daemon, or on only some repositories, stay a wait", async () => {
