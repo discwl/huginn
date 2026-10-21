@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { hostHealthRpc } from "../shared/health-contracts.ts";
 import { Action, Badge, Card, Disclosure, Metric, Notice, SectionHeading } from "./controls.tsx";
@@ -19,11 +19,24 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
   const dateTime = useHostDateTime();
   const read = useRpc(hostHealthRpc);
   const [details, setDetails] = useState(false);
-  const report = useQuery({ queryKey: [host.id, "gortex", "host-health"], queryFn: () => read({}), retry: false, refetchInterval: 30000, refetchIntervalInBackground: false, refetchOnWindowFocus: false });
+  const queryClient = useQueryClient();
+  const queryKey = [host.id, "gortex", "host-health"];
+  const report = useQuery({ queryKey, queryFn: () => read({}), retry: false, refetchInterval: 30000, refetchIntervalInBackground: false, refetchOnWindowFocus: false });
+  // The 30-second refresh skips repositories Gortex is refusing; Try now (and Refresh) asks Gortex again right away.
+  const retry = useMutation({
+    mutationFn: () => read({ retryNow: true }),
+    onSuccess: result => {
+      queryClient.setQueryData(queryKey, result);
+      // Gortex answers again: reload what its paused requests left unavailable (the library, worktrees).
+      if (result.state === "available") void queryClient.invalidateQueries({ predicate: query => query.queryKey[0] === host.id && query.queryKey[1] === "gortex" && query.queryKey[2] !== "host-health" });
+    },
+  });
   const health = report.data?.health;
   const stale = report.isError || !!(health && Date.now() - Date.parse(health.ts) > 90000);
-  const busy = !health && report.data?.state === "busy";
-  const state = health ? stale ? "Stale snapshot" : health.ready ? "Ready" : "Warming up" : busy ? "Busy" : report.isError || report.data?.error ? "Unavailable" : "Connecting";
+  const waiting = report.data?.state === "busy" || report.data?.state === "paused";
+  const busy = !health && waiting;
+  const state = health ? stale ? "Stale snapshot" : health.ready ? "Ready" : "Warming up" : report.data?.state === "paused" ? "Paused" : busy ? "Busy" : report.isError || report.data?.error ? "Unavailable" : "Connecting";
+  const checking = retry.isPending || report.isFetching;
   if (compact) return <View style={{ gap: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12, flexShrink: 1 }}>
@@ -31,9 +44,13 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
         <Badge theme={theme} label={state} tone={state === "Ready" ? "success" : state === "Unavailable" || stale ? "danger" : "warning"} icon={state === "Ready" ? "CheckCircle2" : "Clock"} />
         {health && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18, flexShrink: 1 }}>{health.tracked_repos} repos · {health.graph_nodes.toLocaleString()} nodes · {(health.alloc_bytes / 1048576).toFixed(1)} MiB · up {uptime(health.uptime_seconds)}</Text>}
       </View>
-      {onDetails && <Action theme={theme} title="View health" icon="ArrowUpRight" onPress={onDetails} />}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+        {busy && <Action theme={theme} title={checking ? "Checking…" : "Try now"} icon="RefreshCw" disabled={checking} onPress={() => retry.mutate()} />}
+        {onDetails && <Action theme={theme} title="View health" icon="ArrowUpRight" onPress={onDetails} />}
+      </View>
     </View>
     {(report.error || report.data?.error) && <Notice theme={theme} error={!busy} text={report.error?.message ?? report.data?.error ?? "Health is unavailable."} />}
+    {retry.error && <Notice theme={theme} error text={retry.error.message} />}
   </View>;
   return <Card theme={theme}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
@@ -42,11 +59,12 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
         <Badge theme={theme} label={state} tone={state === "Ready" ? "success" : state === "Unavailable" || stale ? "danger" : "warning"} icon={state === "Ready" ? "CheckCircle2" : "Clock"} />
         {health && <Badge theme={theme} label={health.enriched ? "Enriched" : "Enrichment pending"} tone={health.enriched ? "neutral" : "warning"} icon="Sparkles" />}
       </View>
-      <Action title={report.isFetching ? "Checking…" : "Refresh health"} icon="RefreshCw" disabled={report.isFetching} theme={theme} onPress={() => { void report.refetch(); }} />
+      <Action title={checking ? "Checking…" : busy ? "Try now" : "Refresh health"} icon="RefreshCw" disabled={checking} theme={theme} onPress={() => retry.mutate()} />
     </View>
     {!report.data && report.isFetching && <Notice theme={theme} text="Connecting to Gortex for a health snapshot…" />}
     {report.error && <Notice theme={theme} error text={`Health unavailable: ${report.error.message}`} />}
     {report.data?.error && <Notice theme={theme} error={!busy} text={report.data.error} />}
+    {retry.error && <Notice theme={theme} error text={retry.error.message} />}
     {health && <>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
         <Metric theme={theme} icon="Network" label="Graph nodes" value={health.graph_nodes.toLocaleString()} detail={`${health.tracked_repos} tracked ${health.tracked_repos === 1 ? "repository" : "repositories"}`} />

@@ -32,6 +32,7 @@ import { suggestJobRpc, suggestLatestRpc, suggestStartRpc } from "./shared/exclu
 import { PluginUpdater } from "./server/plugin-updater.ts";
 import { pluginUpdateApplyRpc, pluginUpdateCheckRpc } from "./shared/plugin-update-contracts.ts";
 import { GortexDiagnostics } from "./server/diagnostics.ts";
+import { CheckoutActivity, hostEvidence } from "./server/diagnostics-evidence.ts";
 import { hostSettingsIo, readHostSettings } from "./server/host-settings.ts";
 import { hostSettingsRpc } from "./shared/host-settings-contracts.ts";
 import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc } from "./shared/diagnostics-contracts.ts";
@@ -42,7 +43,7 @@ export default function contribute(server: PluginServerContext) {
     return { timeZone, locale };
   });
   const nativePicker = new NativeFolderPicker();
-  server.handle(hostHealthRpc, () => readHostHealth(native));
+  server.handle(hostHealthRpc, ({ retryNow }) => readHostHealth(native, { retryNow }));
   server.handle(hostSavingsRpc, readHostSavings);
   server.handle(nativePickerCapabilitiesRpc, () => nativePicker.capabilities());
   server.handle(nativePickerStartRpc, ({ initialPath }) => nativePicker.start(initialPath));
@@ -65,8 +66,11 @@ export default function contribute(server: PluginServerContext) {
   const untrack = new RepositoryUntrack(native, undefined, () => library.close(), admin);
   const track = new RepositoryTrack(native, () => library.close(), admin);
   const autoIndex = new AutoIndexer(track, metadata, async () => { const state = await settings.read(); return state.status === "ready" ? state.values : null; });
+  // Worktrees Paseo adds or removes, which Gortex then has to discover; Diagnostics lists the recent ones.
+  const checkoutActivity = new CheckoutActivity();
   // Background work: lifecycle hooks have a 30-second budget, and a skipped or failed run is recorded, not thrown.
-  server.on("workspace.created", ({ workspace }) => { void autoIndex.handle(workspace); });
+  server.on("workspace.created", ({ workspace }) => { void autoIndex.handle(workspace); void checkoutActivity.created(workspace.cwd).catch(() => {}); });
+  server.on("workspace.archived", ({ workspace }) => { void checkoutActivity.archived(workspace.cwd).catch(() => {}); });
   const git = new GitInitializer(() => library.close());
   server.handle(gitStatusRpc, ({ path }) => git.status(path));
   server.handle(gitInitRpc, ({ path }) => git.initialize(path));
@@ -74,7 +78,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(suggestStartRpc, ({ path }, { paseo }) => suggester.start(path, paseo));
   server.handle(suggestJobRpc, ({ id }) => suggester.job(id));
   server.handle(suggestLatestRpc, async ({ path }) => ({ job: await suggester.latestFor(path) }));
-  const diagnostics = new GortexDiagnostics(native, admin, () => library.close());
+  const diagnostics = new GortexDiagnostics(native, admin, () => library.close(), undefined, { evidence: hostEvidence(checkoutActivity) });
   server.handle(diagnosticsRunRpc, () => diagnostics.run());
   server.handle(diagnosticsLatestRpc, () => ({ report: diagnostics.latest() }));
   server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }) => diagnostics.repair(reportId, remedyId));

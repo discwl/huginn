@@ -3,6 +3,11 @@ export class NativeError extends Error {
   constructor(code: string, message: string) { super(message); this.name = "NativeError"; this.code = code; }
 }
 
+/** A request Gortex refused or didn't answer, after which the plugin paused its automatic requests (see StallGuard). */
+export function isWaiting(error: unknown): boolean {
+  return error instanceof NativeError && (error.code === "stalled" || error.code === "paused" || error.code === "timeout");
+}
+
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }

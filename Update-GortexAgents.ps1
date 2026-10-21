@@ -1,7 +1,7 @@
 #Requires -Version 7.2
 <#
 .SYNOPSIS
-    Refresh native Gortex integrations in deny mode, optionally upgrading first.
+    Refresh native Gortex integrations, keeping their hook mode, optionally upgrading first.
 .DESCRIPTION
     Requires a working native Gortex installation, version 0.64.0 or newer
     after any requested upgrade. Always runs native install, including when an
@@ -9,9 +9,13 @@
     hooks, and MCP configuration. This wrapper checks installation results and
     runs daemon status and doctor.
 
-    All supported native provider hooks use deny mode. Codex requires its own
-    environment setting; Claude and OpenCode use --hook-mode=deny, and Copilot
-    CLI's native hook defaults to deny. No legacy hook-mode inference is needed.
+    Native install applies one hook mode to every provider. By default (-HookMode
+    keep) that is the mode the existing Claude Code, Codex, and Copilot CLI hooks
+    set explicitly (--mode=...). A hook without an explicit mode, such as Copilot
+    CLI's native default, doesn't count. When the explicit modes disagree, the
+    script stops and asks for -HookMode. A machine with no Gortex hooks yet gets
+    deny, Gortex's default. deny blocks agents from reading indexed source
+    directly, including while Gortex is stuck; enrich never blocks.
 
     Run Remove-LegacyGortexKit.ps1 before migrating an old kit installation.
     This script does not track worktrees, edit repository policy, or reindex.
@@ -19,6 +23,8 @@
     .\Update-GortexAgents.ps1 -WhatIf
 .EXAMPLE
     .\Update-GortexAgents.ps1 -Upgrade
+.EXAMPLE
+    .\Update-GortexAgents.ps1 -HookMode enrich
 .EXAMPLE
     .\Update-GortexAgents.ps1 -Agents codex,claude-code,copilot-cli,opencode -Profile core
 #>
@@ -28,7 +34,9 @@ param(
     [ValidateSet('core', 'localization', 'full')]
     [string] $Profile,
     [string[]] $Agents,
-    [string] $GortexPath
+    [string] $GortexPath,
+    [ValidateSet('keep', 'deny', 'enrich', 'consult-unlock', 'nudge')]
+    [string] $HookMode = 'keep'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,16 +49,60 @@ foreach ($agent in $Agents) {
     }
 }
 
+# The explicit --mode of each provider's existing Gortex hook commands. Reading these
+# files neither runs Gortex nor changes anything, so a preview can do it too.
+function Get-ExistingHookModes {
+    $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { [Environment]::GetFolderPath('UserProfile') }
+    $claudeHome = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $userHome '.claude' }
+    $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $userHome '.codex' }
+    $sources = [ordered]@{
+        'claude-code' = @((Join-Path $claudeHome 'settings.json'), (Join-Path $claudeHome 'settings.local.json'))
+        'codex'       = @((Join-Path $codexHome 'config.toml'))
+        'copilot-cli' = @((Join-Path $userHome '.copilot/hooks/gortex.json'))
+    }
+    $found = [ordered]@{}
+    foreach ($provider in $sources.Keys) {
+        foreach ($file in $sources[$provider]) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            $text = [IO.File]::ReadAllText($file)
+            foreach ($command in [regex]::Matches($text, '(?i)gortex(?:\.exe)?(?:\\?[''"])?\s+hook\b[^''"\r\n]*')) {
+                $mode = [regex]::Match($command.Value, '(?i)--mode[= ]([a-z][a-z-]*)')
+                if ($mode.Success) {
+                    if (-not $found.Contains($provider)) { $found[$provider] = [System.Collections.Generic.List[string]]::new() }
+                    if (-not $found[$provider].Contains($mode.Groups[1].Value.ToLowerInvariant())) { $found[$provider].Add($mode.Groups[1].Value.ToLowerInvariant()) }
+                }
+            }
+        }
+    }
+    return $found
+}
+
+function Resolve-HookMode {
+    param([string] $Requested)
+    if ($Requested -ne 'keep') { return @{ Mode = $Requested; Reason = 'requested with -HookMode' } }
+    $found = Get-ExistingHookModes
+    $modes = @($found.Values | ForEach-Object { $_ } | Sort-Object -Unique)
+    if ($modes.Count -gt 1) {
+        $detail = ($found.Keys | ForEach-Object { "$_ uses $($found[$_] -join ' and ')" }) -join '; '
+        throw "Existing Gortex hooks use different modes ($detail). Rerun with -HookMode set to the one every provider should use."
+    }
+    if ($modes.Count -eq 1) { return @{ Mode = $modes[0]; Reason = "kept from the existing $(@($found.Keys) -join ', ') hooks" } }
+    return @{ Mode = 'deny'; Reason = "Gortex's default; no existing hook sets a mode" }
+}
+
+$hook = Resolve-HookMode -Requested $HookMode
+
 # A preview must not invoke a binary or download anything.
 if ($WhatIfPreference) {
     if ($Upgrade) { Write-Host '[update] Would upgrade the selected Gortex installation.' }
     if ($Profile) { Write-Host "[update] Would switch the native instruction profile to $Profile." }
-    Write-Host '[update] Would set GORTEX_CODEX_HOOK_MODE=deny for native installation, run install --yes --json --hook-mode=deny, daemon status, and doctor.'
+    Write-Host "[update] Would set GORTEX_CODEX_HOOK_MODE=$($hook.Mode) for native installation, run install --yes --json --hook-mode=$($hook.Mode) ($($hook.Reason)), daemon status, and doctor."
     return
 }
-if (-not $PSCmdlet.ShouldProcess('native Gortex installation and agent configuration', 'Refresh integrations in deny mode (and upgrade if requested)')) {
+if (-not $PSCmdlet.ShouldProcess('native Gortex installation and agent configuration', "Refresh integrations in $($hook.Mode) mode (and upgrade if requested)")) {
     return
 }
+Write-Host "[update] Hook mode: $($hook.Mode) ($($hook.Reason))."
 
 if ($GortexPath) {
     $gortexExe = (Resolve-Path -LiteralPath $GortexPath).ProviderPath
@@ -87,8 +139,8 @@ $previousCodexMode = [Environment]::GetEnvironmentVariable('GORTEX_CODEX_HOOK_MO
 $previousInstallDir = [Environment]::GetEnvironmentVariable('GORTEX_INSTALL_DIR', 'Process')
 try {
     # Native install bakes this into Codex's hook commands. Restoring the shell
-    # environment afterward does not undo the installed deny posture.
-    $env:GORTEX_CODEX_HOOK_MODE = 'deny'
+    # environment afterward does not undo the installed posture.
+    $env:GORTEX_CODEX_HOOK_MODE = $hook.Mode
     $version = Get-GortexVersion
     if ($Upgrade) {
         # v0.64.0's upgrade detector misses the official Windows install location.
@@ -117,7 +169,7 @@ try {
     }
     if ($Profile) { Invoke-Gortex -Arguments @('instructions', 'switch', $Profile) }
 
-    $installArgs = @('install', '--yes', '--json', '--hook-mode=deny')
+    $installArgs = @('install', '--yes', '--json', "--hook-mode=$($hook.Mode)")
     if ($Agents) { $installArgs += '--agents=' + ($Agents -join ',') }
     $installOutput = Invoke-Gortex -Arguments $installArgs -Capture
     try { $report = ConvertFrom-Json -InputObject $installOutput -AsHashtable }
@@ -141,7 +193,7 @@ try {
 
     Invoke-Gortex -Arguments @('daemon', 'status')
     Invoke-Gortex -Arguments @('doctor')
-    Write-Host '[update] Native configuration refreshed in deny mode. Open fresh provider sessions; use /hooks in Codex to review new or changed hooks.'
+    Write-Host "[update] Native configuration refreshed in $($hook.Mode) mode. Open fresh provider sessions; use /hooks in Codex to review new or changed hooks."
     if ($Upgrade) {
         Write-Host '[update] Review project-local gortex init configuration and release reindex guidance separately, once per primary repository.'
     }

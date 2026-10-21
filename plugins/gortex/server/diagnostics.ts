@@ -5,8 +5,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../shared/diagnostics-contracts.ts";
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
-import { busyMessage, isBusyMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
+import { busyMessage, isBusyMessage, isWarmingUpMessage, warmupWindowSeconds } from "../shared/native-retry.ts";
 import { parseDaemonStatus, summarizeSessions, uptimeSeconds, type DaemonSession } from "./daemon-status.ts";
+import { requestTimeouts, type DiagnosticsEvidence, type WorktreeChange } from "./diagnostics-evidence.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { runProcess } from "./process-runner.ts";
 
@@ -25,15 +26,28 @@ export interface DiagnosticsCli {
   /** Optional: hosts without Git skip the worktree check. */
   git?(args: string[], cwd: string): Promise<string>;
 }
-export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number; clock?: () => number; wait?: (ms: number) => Promise<unknown> }
+/** evidence: what the checks read without asking Gortex (its log, worktree records); those checks are left out without it. */
+export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number; clock?: () => number; wait?: (ms: number) => Promise<unknown>; evidence?: DiagnosticsEvidence | null }
 
 const REINDEX = "reindex:", PRUNE = "prune:";
 // Warm-up after a start is normally seconds; past this, a discovery failure on every repository is a wedge.
-const STUCK_AFTER_SECONDS = 300;
+const STUCK_AFTER_SECONDS = warmupWindowSeconds;
 // Gortex allows 250 ms for two Git commands; a single start slower than this leaves no headroom.
 const SLOW_GIT_MS = 100;
 // A refused first request is retried inside the 5 seconds Gortex keeps its finished Git check.
 const PROBE_ATTEMPTS = 5, PROBE_RETRY_MS = 400;
+// Repositories are probed a few at a time. When all of a batch are refused, one stuck lane refuses them all, and
+// probing the rest would only add to Gortex's work.
+const PROBE_BATCH = 3;
+const TIMEOUT_WINDOW_MS = 15 * 60_000, WORKTREE_WINDOW_MS = 2 * 60 * 60_000;
+// Gortex's own CLI calls and this plugin's connections are not agent chats.
+const NOT_AGENTS = new Set(["", "cli", "paseo-gortex"]);
+const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+/** Host-local "2026-10-20 10:21", the same clock the host's Gortex logs use. */
+function stamp(ms: number): string {
+  const date = new Date(ms), pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 const message = (error: unknown) => error instanceof Error ? error.message : "The check failed.";
 const hostCli: DiagnosticsCli = {
   run: (args, timeoutMs = 30_000) => runProcess("gortex", args, homedir(), { timeoutMs, maxBytes: 512 * 1024 }),
@@ -56,6 +70,7 @@ export class GortexDiagnostics {
   private now: () => number;
   private clock: () => number;
   private wait: (ms: number) => Promise<unknown>;
+  private evidence: DiagnosticsEvidence | null;
   private reports = new Map<string, DiagnosticsReport>();
   private jobs = new Map<string, RepairJob>();
   private latestId: string | null = null;
@@ -67,6 +82,7 @@ export class GortexDiagnostics {
     this.now = options.now ?? Date.now;
     this.clock = options.clock ?? (() => performance.now());
     this.wait = options.wait ?? (ms => delay(ms));
+    this.evidence = options.evidence ?? null;
   }
 
   /** One repository, the way an agent meets it: a refused first request is repeated right away. */
@@ -115,10 +131,11 @@ export class GortexDiagnostics {
     let daemonRunning = false, daemonReady = false;
     let sessions: DaemonSession[] = [];
     let uptime: number | null = null;
+    let socket: string | null = null;
     try {
       status = await this.cli.run(["daemon", "status"], 30_000);
       const parsed = parseDaemonStatus(status);
-      daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions; uptime = uptimeSeconds(parsed.uptime);
+      daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions; uptime = uptimeSeconds(parsed.uptime); socket = parsed.socket;
       const warming = parsed.warming;
       const state = daemonReady ? "pass" : daemonRunning ? "warn" : "fail";
       checks.push({
@@ -193,29 +210,35 @@ export class GortexDiagnostics {
     const gitSlow = gitMs !== null && gitMs > SLOW_GIT_MS;
 
     const failures: string[] = [], retried: string[] = [];
-    let busy = false, warming = false, discoveryFailures = 0;
-    for (let start = 0; start < probes.length; start += 6) {
-      const results = await Promise.all(probes.slice(start, start + 6).map(row => this.probe(row)));
+    let busy = false, warming = false, discoveryFailures = 0, probed = 0;
+    for (let start = 0; start < probes.length; start += PROBE_BATCH) {
+      const batch = probes.slice(start, start + PROBE_BATCH);
+      const results = await Promise.all(batch.map(row => this.probe(row)));
+      probed += batch.length;
+      let refused = 0;
       for (const result of results) {
         if (result.ok) { if (result.attempts > 1) retried.push(result.row.repo); continue; }
         const { row, text } = result;
         if (isBusyMessage(text)) { busy = true; failures.push(`${row.repo}: refused, dispatcher busy`); }
-        else if (isWarmingUpMessage(text)) { warming = true; discoveryFailures++; failures.push(`${row.repo}: checkout discovery pending`); }
+        else if (isWarmingUpMessage(text)) { warming = true; discoveryFailures++; refused++; failures.push(`${row.repo}: checkout discovery pending`); }
         else failures.push(`${row.repo}: ${trim(text, 120)}`);
       }
+      if (refused === batch.length) break;
     }
-    // Stuck means: ready for minutes, Git is fast, and every repository still refuses after quick retries.
+    const unprobed = probes.length - probed;
+    // Stuck means: ready for minutes, Git is fast, and every repository asked still refuses after quick retries.
     // A slow Git explains the same refusals without anything being wedged, and a restart would not help.
-    const stuck = !gitSlow && daemonReady && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probes.length > 0 && discoveryFailures === probes.length;
+    const stuck = !gitSlow && daemonReady && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probed > 0 && discoveryFailures === probed;
     if (stuck) warming = false;
+    const notAsked = unprobed ? ` The other ${plural(unprobed, "repository", "repositories")} weren't asked, since asking only adds to Gortex's work while it refuses everything.` : "";
     checks.push({
       id: "repositories", title: "Repository access",
       state: failures.length === 0 ? retried.length ? "warn" : "pass" : stuck ? "fail" : busy || warming ? "warn" : "fail",
       detail: failures.length === 0
         ? retried.length ? `All ${probes.length} answer, but ${retried.length} only on a retry. Agents can see "checkout discovery is pending" on a first request; repeating the request right away works.`
           : `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.`
-        : stuck ? `Gortex reports ready${gitMs === null ? "" : " and Git is fast"}, but checkout discovery fails for all ${probes.length} ${probes.length === 1 ? "repository" : "repositories"} even on quick retries. It looks stuck rather than busy.`
-        : `${failures.length} of ${probes.length} did not answer, even on quick retries.`,
+        : stuck ? `Gortex reports ready${gitMs === null ? "" : " and Git is fast"}, but checkout discovery fails for ${unprobed ? `the first ${probed}` : `all ${probed}`} ${probed === 1 ? "repository" : "repositories"} even on quick retries. It looks stuck rather than busy.${notAsked}`
+        : `${failures.length} of ${probed} did not answer, even on quick retries.${notAsked}`,
       evidence: failures.length ? trim(failures.join(" · "), 400) : retried.length ? `needed a retry: ${retried.join(", ")}` : null,
     });
     if (stuck) add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
@@ -242,12 +265,65 @@ export class GortexDiagnostics {
       });
       for (const item of stale) add({ id: `${PRUNE}${item.path}`, title: `Prune stale worktrees in ${item.repo}`, detail: "Runs git worktree prune, which removes Git's records of worktrees whose folders are already gone. No files or branches are deleted.", risk: "safe", target: item.path });
     }
-    if (warming) add({ id: "recheck", title: "Wait and re-check", detail: warmingUpMessage, risk: "safe", target: null });
+    if (this.evidence) await this.evidenceChecks(this.evidence, checks, { socket, sessions, probes: probes.map(row => row.path), trouble: stuck || discoveryFailures > 0 });
+    if (warming) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again. Gortex refuses requests while it discovers checkouts, which normally clears within minutes of a daemon start or a new worktree.", risk: "safe", target: null });
     if (failures.length && !busy && !warming && !stuck) {
       add({ id: "daemon-reload", title: "Reload Gortex configuration", detail: "Runs gortex daemon reload, which re-reads config.yaml and picks up added or removed repositories without a restart.", risk: "safe", target: null });
       add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
     }
     return this.finish(started, checks, [...remedies.values()]);
+  }
+
+  /** Checks read without asking Gortex: timeouts in its log, recent worktree changes, and chats older than its last update. */
+  private async evidenceChecks(evidence: DiagnosticsEvidence, checks: DiagnosticCheck[], context: { socket: string | null; sessions: DaemonSession[]; probes: string[]; trouble: boolean }): Promise<void> {
+    const now = this.now();
+    const log = await evidence.daemonLog(context.socket).catch(() => null);
+    let timedOut = 0;
+    if (log === null) checks.push({ id: "timeouts", title: "Requests that ran out of time", state: "skipped", detail: "Gortex's daemon log can't be read on this host, so request timeouts weren't checked.", evidence: null });
+    else {
+      const timeouts = requestTimeouts(log, now - TIMEOUT_WINDOW_MS);
+      timedOut = timeouts.count;
+      const clients = new Map<string, number>();
+      for (const [id, count] of timeouts.sessions) {
+        const client = context.sessions.find(session => session.id === id)?.client || "a closed session";
+        clients.set(client, (clients.get(client) ?? 0) + count);
+      }
+      checks.push({
+        id: "timeouts", title: "Requests that ran out of time", state: timedOut ? "warn" : "pass",
+        detail: timedOut
+          ? `${plural(timedOut, "request")} in the last 15 minutes waited out Gortex's ${timeouts.deadlineSeconds ?? 60}-second limit without an answer. While one waits, it takes one of the 8 requests Gortex serves at a time, so other agents can be refused as busy.`
+          : "No request waited out Gortex's time limit in the last 15 minutes.",
+        evidence: timedOut ? trim(`${[...clients].map(([client, count]) => `${count} from ${client}`).join(", ")} · latest at ${timeouts.latest.map(at => stamp(at).slice(11)).join(", ")}`, 300) : null,
+      });
+    }
+    // Gortex discovers every worktree that's added or removed.
+    const changes = await evidence.worktreeChanges(context.probes, now - WORKTREE_WINDOW_MS).catch((): WorktreeChange[] => []);
+    if (changes.length) {
+      const added = changes.filter(change => change.change === "added").length, removed = changes.length - added;
+      const what = added && removed ? `${plural(added, "worktree was", "worktrees were")} added and ${removed} removed`
+        : added ? `${plural(added, "worktree was", "worktrees were")} added` : `${plural(removed, "worktree was", "worktrees were")} removed`;
+      const trouble = context.trouble || timedOut > 0;
+      checks.push({
+        id: "worktree-changes", title: "Recent worktree changes", state: trouble ? "warn" : "pass",
+        detail: trouble
+          ? `${what} in the last 2 hours, the latest ${Math.max(1, Math.round((now - changes[0].at) / 60_000))} min ago. Gortex discovers every worktree that's added or removed, and on some Windows hosts that discovery doesn't finish, which leaves every repository waiting.`
+          : `${what} in the last 2 hours. Gortex discovers each one, and it answered normally afterwards.`,
+        evidence: trim(changes.slice(0, 8).map(change => `${change.change} ${stamp(change.at).slice(11)} ${change.path}${change.source === "paseo" ? " (Paseo)" : ""}`).join(" · "), 400),
+      });
+    }
+    // A chat's Gortex tools come from the Gortex that was installed when it connected.
+    const changedAt = await evidence.executableChangedAt().catch(() => null);
+    const agents = context.sessions.filter(session => !NOT_AGENTS.has(session.client));
+    if (changedAt !== null && agents.length) {
+      const older = agents.filter(session => { const seconds = uptimeSeconds(session.connected); return seconds !== null && now - seconds * 1000 < changedAt; });
+      checks.push({
+        id: "sessions", title: "Agent chats", state: older.length ? "warn" : "pass",
+        detail: older.length
+          ? `${plural(older.length, "agent chat was", "agent chats were")} already open when Gortex was last updated (${stamp(changedAt)}). They keep the previous Gortex tools until they're restarted, so their agents can report Gortex tools as missing.`
+          : `${plural(agents.length, "agent chat is", "agent chats are")} connected, all opened after Gortex was last updated (${stamp(changedAt)}). A chat that has run for a long time can still keep older Gortex tools; restart it if its agent reports them missing.`,
+        evidence: older.length ? trim(older.map(session => `${session.client}, connected ${session.connected}, ${session.cwd}`).join(" · "), 400) : null,
+      });
+    }
   }
 
   private finish(started: number, checks: DiagnosticCheck[], remedies: Remedy[]): DiagnosticsReport {

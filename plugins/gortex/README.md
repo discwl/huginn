@@ -23,6 +23,19 @@ repository metadata and exclusions, and explicitly tracking or untracking reposi
   daemon and index metrics, so shared totals are not repeated inside each repo.
 - Daemon health, uptime, graph counts, memory, MCP sessions, and language-server
   state. Health refreshes every 30 seconds while the panel is active.
+- When Gortex refuses a repository's requests because it is still discovering
+  checkouts, the plugin retries once right away and then pauses its automatic requests
+  for that repository (refreshes, catalog rows, the Worktrees tab) for a minute, then
+  2, 4 and at most 10 minutes. Two repositories refused within a minute pause the whole
+  host. On some Windows hosts this discovery stays stuck for hours, and retries only add
+  to Gortex's work. **Try now** in Host health ends the pause; requests you make
+  yourself, such as searches, still try. Within five minutes of a daemon start,
+  refusals are waited out as before, and readiness checks after indexing never pause.
+- **Diagnostics** also reads, without asking Gortex: requests in its daemon log that
+  waited out its 60-second limit, worktrees added or removed in the last two hours
+  (which Gortex has to discover), and agent chats that were already open when Gortex
+  was last updated. Repositories are checked three at a time, and the checks stop
+  asking once a whole batch is refused.
 - On-demand reported token savings and **host index health**. The native
   `workspace.index` report covers every repository and workspace on that daemon;
   its file/node/relationship totals and score are not per-repository statistics.
@@ -78,7 +91,10 @@ restored after a daemon restart, because the new release may migrate native stor
 
 Updating Gortex may make version-gated plugin features unavailable until their
 contracts are verified. Updating this plugin itself remains a separate Paseo action:
-`paseo plugin update gortex` for GitHub installations.
+`paseo plugin update gortex --check`, then `--yes`, for GitHub installations.
+
+Agent chats that are already open keep the previous Gortex tools until they're
+restarted. **Diagnostics → Agent chats** lists the ones that were open during an update.
 
 ## Current limits
 
@@ -111,11 +127,12 @@ contracts are verified. Updating this plugin itself remains a separate Paseo act
 
 ## Compatibility
 
-The installed integration was validated with Paseo `0.8.0-beta.1`, Gortex
-`0.64.3+56a1c29`, and Node `22.14.0`. The manifest accepts Paseo
-`>=0.8.0-beta.1 <0.9.0`. Read adapters accept compatible Gortex 0.64.x patches starting at 0.64.2; metadata writes
-and tracking/untracking are gated to the verified 0.64.3 contract and are unavailable for
-unverified versions.
+The installed integration runs on Paseo `0.12.0` with Gortex `0.64.8` and Node
+`22.14.0`, and is typechecked against the Paseo plugin SDK `0.12.0`. It was first
+validated with Paseo `0.8.0-beta.1` and Gortex `0.64.3`; the manifest accepts Paseo
+`0.8.0-beta.1` and later. Read adapters accept stable Gortex releases from 0.64.2;
+metadata writes and tracking/untracking need 0.64.3 or later. These are minimums, and
+native responses are still validated before any change.
 
 Gortex and Git must be available on the Paseo daemon account's `PATH`, with Gortex's
 existing configuration and shared daemon accessible to that account. Native commands
@@ -139,12 +156,15 @@ trusting it. Do not put credentials in plugin settings.
 
 ### Install directly from GitHub
 
-On the target host, with Git, Node.js/npm, Paseo 0.8, and Gortex already installed:
+On the target host, with Git, Node.js/npm, Paseo 0.8 or later, and Gortex already installed:
 
 ```powershell
-paseo plugin add discwl/huginn:plugins/gortex --ref main
+paseo plugin add git:https://github.com/discwl/huginn.git:plugins/gortex --ref main
 paseo plugin ls gortex
 ```
+
+Keep the `git:` prefix: from Paseo 0.12, a bare `owner/repository` source names an
+entry in Paseo's plugin registry rather than a GitHub repository.
 
 Paseo downloads and manages the checkout on that host. The manifest's preparation
 step installs the locked dependencies and typechecks the plugin before activation.
@@ -154,7 +174,7 @@ To manage another daemon from your current machine, provide its actual connectio
 address. For example, replace the SSH username and address below with your own:
 
 ```powershell
-paseo --host "ssh://YOUR_USER@XENDEE_ADDRESS" plugin add discwl/huginn:plugins/gortex --ref main
+paseo --host "ssh://YOUR_USER@XENDEE_ADDRESS" plugin add git:https://github.com/discwl/huginn.git:plugins/gortex --ref main
 ```
 
 The target daemon performs the Git fetch and installation. Its operating-system
@@ -166,8 +186,12 @@ For later updates to a Git-managed installation, run this on the same host, or u
 the same explicit `--host` connection:
 
 ```powershell
-paseo plugin update gortex
+paseo plugin update gortex --check
+paseo plugin update gortex --yes
 ```
+
+The first command shows the update without installing it. From Paseo 0.12,
+`plugin update` asks before installing, so `--yes` applies the update it showed.
 
 See the [Paseo plugin reference](https://paseo.sh/docs/plugins/v0.8/reference#cli-reference)
 for Git sources, tracked branches, pinned revisions, and installation effects.
@@ -179,13 +203,13 @@ any custom plugin preferences, then run this once on that host:
 
 ```powershell
 paseo plugin remove gortex
-paseo plugin add discwl/huginn:plugins/gortex --ref main
+paseo plugin add git:https://github.com/discwl/huginn.git:plugins/gortex --ref main
 ```
 
 Removing a directory installation keeps its source directory, but clears Paseo's
 saved settings for that plugin ID. Gortex's native configuration, repositories,
 and indexes remain intact. Reapply any custom plugin preferences after installing.
-For subsequent Git-managed updates, use `paseo plugin update gortex`.
+For subsequent Git-managed updates, use `paseo plugin update gortex --check`, then `--yes`.
 
 ### Install a development checkout
 

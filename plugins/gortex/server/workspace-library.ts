@@ -4,8 +4,8 @@ import { z } from "zod";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
 import { busyMessage, isBusyMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
 import { symbolSchema, type Catalog, type Inspection, type NativeAssignment, type Repository, type RepositoryContext, type SearchPage } from "../shared/models.ts";
-import type { NativePort } from "./gortex-client.ts";
-import { NativeError } from "./native-response.ts";
+import type { NativePort, RequestOptions } from "./gortex-client.ts";
+import { isWaiting, NativeError } from "./native-response.ts";
 import { runProcess } from "./process-runner.ts";
 import { QueryCache } from "./query-cache.ts";
 import { ProjectCatalog, findEnclosingGit, repositoryPathKey } from "./project-catalog.ts";
@@ -31,14 +31,15 @@ export class WorkspaceLibrary {
   private selectedSymbols = new Map<string, number>();
   constructor(native: NativePort) { this.native = native; }
 
-  /** Last verified identity per path. Reused only while Gortex is warming up, so a busy discovery lane does not flip rows to unavailable. */
+  /** Last verified identity per path. Reused only while Gortex is warming up or refusing, so a busy discovery lane does not flip rows to unavailable. */
   private resolved = new Map<string, Repository>();
 
-  private async resolve(row: NativeAssignment): Promise<Repository> {
+  /** background: a catalog page, whose rows aren't asked about while Gortex is refusing them. */
+  private async resolve(row: NativeAssignment, options: RequestOptions = {}): Promise<Repository> {
     const base = { name: row.repo, path: row.path, declaredWorkspace: row.workspace, declaredProject: row.project, assignmentSource: row.source };
     try {
       const path = await realpath(row.path);
-      const info = await this.native.info(path);
+      const info = await this.native.info(path, options);
       const matches = [];
       for (const member of info.members) {
         try { if (samePath(await realpath(member.path), path)) matches.push(member); } catch { /* An inaccessible member cannot authorize this context. */ }
@@ -51,7 +52,7 @@ export class WorkspaceLibrary {
       return repository;
     } catch (error) {
       const text = message(error);
-      if (text === warmingUpMessage || text === busyMessage) {
+      if (text === warmingUpMessage || text === busyMessage || isWaiting(error)) {
         // A verified identity from this session stays usable while discovery catches up.
         const previous = this.resolved.get(repositoryPathKey(row.path));
         if (previous) return { ...previous, error: text };
@@ -66,7 +67,7 @@ export class WorkspaceLibrary {
     const merged = await this.projects.merge(rows, input.paseoProjects);
     const { rows: visibleRows, ...page } = pageAssignments(merged.rows, input);
     const repositories: Repository[] = [];
-    for (const row of visibleRows) repositories.push(merged.candidates.get(repositoryPathKey(row.path)) ?? await this.resolve(row));
+    for (const row of visibleRows) repositories.push(merged.candidates.get(repositoryPathKey(row.path)) ?? await this.resolve(row, { background: true }));
     return {
       version, repositories, ...page,
       observedAt: new Date().toISOString(),
