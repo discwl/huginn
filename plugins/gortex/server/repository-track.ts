@@ -122,7 +122,8 @@ export class RepositoryTrack {
     return structuredClone(job);
   }
   private async repository(path: string, row: NativeAssignment): Promise<TrackJob["repository"]> {
-    const info = await this.native.info(path);
+    // A newly tracked repository is "not ready yet" for a while; these readiness checks never pause other requests.
+    const info = await this.native.info(path, { single: true });
     const matches = [];
     for (const member of info.members) {
       try { if (sameRepositoryPath(await realpath(member.path), path)) matches.push(member); } catch { /* No substitute view. */ }

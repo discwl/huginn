@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { homedir } from "node:os";
 import { requireNativeCompatibility, requireTrackCliSupport } from "../shared/native-compatibility.ts";
-import { isWarmingUpMessage, warmupRetryDelaysMs } from "../shared/native-retry.ts";
+import { isBusyMessage, isStallMessage, pausedMessage, stalledMessage, warmupRetryDelaysMs, warmupWindowSeconds } from "../shared/native-retry.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
@@ -10,18 +10,47 @@ import { nativeAssignmentSchema, nativeInfoSchema, type NativeAssignment, type N
 import { decodeNativeResult, NativeError } from "./native-response.ts";
 import { runProcess } from "./process-runner.ts";
 import { resolveHostExecutable } from "./host-executable.ts";
+import { parseDaemonStatus, uptimeSeconds } from "./daemon-status.ts";
+import { StallGuard } from "./stall-guard.ts";
 
 interface Connection { client: Client; ready: Promise<void>; active: number; touched: number }
+/**
+ * background: an automatic request (a refresh, a catalog page), not sent while Gortex is refusing that repository.
+ * single: one try that never pauses anything, for readiness checks that expect "not ready yet" for a while.
+ */
+export interface RequestOptions { background?: boolean; single?: boolean }
 export interface NativePort {
   assignments(): Promise<NativeAssignment[]>;
-  info(cwd: string): Promise<NativeInfo>;
+  info(cwd: string, options?: RequestOptions): Promise<NativeInfo>;
   version(): Promise<string>;
-  query(cwd: string, operation: "index" | "search" | "source" | "callers" | "dependencies" | "usages" | "implementations" | "impact", args?: Record<string, unknown>): Promise<{ value: unknown; meta: unknown }>;
+  query(cwd: string, operation: "index" | "search" | "source" | "callers" | "dependencies" | "usages" | "implementations" | "impact", args?: Record<string, unknown>, options?: RequestOptions): Promise<{ value: unknown; meta: unknown }>;
   close(): Promise<void>;
+}
+export interface GortexClientOptions {
+  now?: () => number;
+  wait?: (ms: number) => Promise<unknown>;
+  /** Whether the daemon started recently enough that its refusals are still start-up discovery. */
+  warmingUp?: () => Promise<boolean>;
+  stalls?: StallGuard;
 }
 
 import { sampleDaemonHealth } from "./health-snapshot.ts";
 import type { DaemonHealth } from "../shared/health-models.ts";
+
+// Gortex keeps its finished Git check for 5 seconds, so a quick refusal caused by a slow Git start answers on an
+// immediate retry. A slower refusal means Gortex was working on something else, and a retry won't help.
+const QUICK_REFUSAL_MS = 2000, QUICK_RETRY_MS = 400;
+
+const isMcpTimeout = (error: unknown) => (error as { code?: unknown } | null)?.code === -32001 || /\brequest timed out\b/i.test(error instanceof Error ? error.message : "");
+
+/** Which kind of refusal an error is, or null for an ordinary failure. */
+function refusal(error: unknown): "busy" | "stall" | "timeout" | null {
+  const text = error instanceof Error ? error.message : "";
+  const code = (error as { code?: unknown } | null)?.code;
+  if (isBusyMessage(text)) return "busy";
+  if (code === "timeout" || code === "health_timeout") return "timeout";
+  return isStallMessage(text) ? "stall" : null;
+}
 
 export class GortexClient implements NativePort {
   private binary: string;
@@ -29,7 +58,17 @@ export class GortexClient implements NativePort {
   private closed = false;
   private updating = false;
   private admission: Promise<void> = Promise.resolve();
-  constructor(binary = "gortex") { this.binary = binary; }
+  private options: GortexClientOptions;
+  private now: () => number;
+  private wait: (ms: number) => Promise<unknown>;
+  private stalls: StallGuard;
+  private warmCheck: { at: number; value: Promise<boolean> } | null = null;
+  constructor(binary = "gortex", options: GortexClientOptions = {}) {
+    this.binary = binary; this.options = options;
+    this.now = options.now ?? Date.now;
+    this.wait = options.wait ?? (ms => delay(ms));
+    this.stalls = options.stalls ?? new StallGuard({ now: this.now });
+  }
 
   async assignments(): Promise<NativeAssignment[]> {
     const raw = await runProcess(this.binary, ["workspace", "list", "--json"], homedir());
@@ -44,6 +83,14 @@ export class GortexClient implements NativePort {
     requireNativeCompatibility(match[1], false);
     return `gortex ${match[1]}`;
   }
+
+  /** When this repository's automatic requests may resume (ms since the epoch), or null when they aren't paused. */
+  async pausedUntil(cwd: string): Promise<number | null> {
+    return this.stalls.pausedUntil(await realpath(cwd).catch(() => cwd));
+  }
+
+  /** Try now: automatic requests are sent again right away. */
+  resumeRequests(): void { this.stalls.resume(); }
 
   private async acquire(key: string): Promise<Connection> {
     let unlock!: () => void;
@@ -85,16 +132,66 @@ export class GortexClient implements NativePort {
     } finally { unlock(); }
   }
 
-  /** Retries only Gortex's own "retry this request" warm-up conditions; every other error surfaces immediately. */
-  private async call(cwd: string, name: string, args: Record<string, unknown>, timeout = 20000): Promise<{ value: unknown; meta: unknown }> {
+  /** Whether the daemon started within the last few minutes, from `gortex daemon status` (cached for 10 seconds). */
+  private warmingUp(): Promise<boolean> {
+    const now = this.now();
+    if (this.warmCheck && now - this.warmCheck.at < 10_000) return this.warmCheck.value;
+    const value = this.options.warmingUp
+      ? this.options.warmingUp().catch(() => false)
+      : runProcess(this.binary, ["daemon", "status"], homedir(), { timeoutMs: 10_000, maxBytes: 256 * 1024 }).then(text => {
+        const status = parseDaemonStatus(text), uptime = uptimeSeconds(status.uptime);
+        return status.warming || (uptime !== null && uptime < warmupWindowSeconds);
+      }, () => false);
+    this.warmCheck = { at: now, value };
+    return value;
+  }
+
+  /**
+   * Sends one request and retries only Gortex's refusals. Out of request slots, or within minutes of a daemon start,
+   * refusals are retried on the warm-up schedule. Otherwise a quick refusal gets one immediate retry, and then the
+   * repository's automatic requests pause (see StallGuard) instead of adding to a stuck host's work.
+   */
+  private async serve<T>(key: string, send: () => Promise<T>, options: RequestOptions, timeoutMs: number): Promise<T> {
+    if (options.background && !options.single) {
+      const until = this.stalls.pausedUntil(key);
+      if (until !== null) throw new NativeError("paused", pausedMessage(until - this.now()));
+    }
+    let quickRetried = false;
     for (let attempt = 0; ; attempt++) {
-      try { return await this.attempt(cwd, name, args, timeout); }
-      catch (error) {
-        const retriable = error instanceof NativeError && isWarmingUpMessage(error.message) && attempt < warmupRetryDelaysMs.length && !this.closed;
-        if (!retriable) throw error;
-        await delay(warmupRetryDelaysMs[attempt]);
+      const started = this.now();
+      try {
+        const value = await send();
+        this.stalls.answered(key);
+        return value;
+      } catch (error) {
+        const kind = refusal(error);
+        if (!kind || this.closed) throw error;
+        const scheduled = attempt < warmupRetryDelaysMs.length;
+        if (kind === "busy") {
+          if (!scheduled) throw error;
+          await this.wait(warmupRetryDelaysMs[attempt]);
+          continue;
+        }
+        if (options.single) throw error;
+        if (kind === "stall" && await this.warmingUp()) {
+          if (!scheduled) throw error;
+          await this.wait(warmupRetryDelaysMs[attempt]);
+          continue;
+        }
+        if (kind === "stall" && !quickRetried && this.now() - started < QUICK_REFUSAL_MS) {
+          quickRetried = true;
+          await this.wait(QUICK_RETRY_MS);
+          continue;
+        }
+        const pauseMs = this.stalls.refused(key);
+        throw new NativeError(kind === "timeout" ? "timeout" : "stalled", stalledMessage(pauseMs, kind === "timeout" ? timeoutMs : null));
       }
     }
+  }
+
+  private async call(cwd: string, name: string, args: Record<string, unknown>, timeout = 20000, options: RequestOptions = {}): Promise<{ value: unknown; meta: unknown }> {
+    const key = await realpath(cwd);
+    return this.serve(key, () => this.attempt(key, name, args, timeout), options, timeout);
   }
 
   private async attempt(cwd: string, name: string, args: Record<string, unknown>, timeout: number): Promise<{ value: unknown; meta: unknown }> {
@@ -116,6 +213,7 @@ export class GortexClient implements NativePort {
       if (this.connections.get(key) === connection) this.connections.delete(key);
       await connection.client.close().catch(() => {});
       if (error instanceof NativeError) throw error;
+      if (isMcpTimeout(error)) throw new NativeError("timeout", `Gortex didn't answer within ${Math.round(timeout / 1000)} seconds.`);
       throw new NativeError("mcp_unavailable", "Gortex MCP request failed. Verify the existing daemon is reachable, then refresh. The plugin does not start or restart it.");
     } finally { connection.active--; }
     // Semantic/native response errors do not tear down a healthy shared connection.
@@ -128,14 +226,16 @@ export class GortexClient implements NativePort {
 
   /** One attempt, no warm-up retries: for health checks that need the present state, not an eventual answer. */
   async infoOnce(cwd: string): Promise<NativeInfo> {
-    const result = await this.attempt(cwd, "workspace", { operation: "info", arguments: { format: "json" } }, 20000);
+    const key = await realpath(cwd);
+    const result = await this.attempt(key, "workspace", { operation: "info", arguments: { format: "json" } }, 20000);
+    this.stalls.answered(key);
     const parsed = nativeInfoSchema.safeParse(result.value);
     if (!parsed.success) throw new NativeError("identity_shape", "Unsupported native context identity response.");
     return parsed.data;
   }
 
-  async info(cwd: string): Promise<NativeInfo> {
-    const result = await this.call(cwd, "workspace", { operation: "info", arguments: { format: "json" } });
+  async info(cwd: string, options: RequestOptions = {}): Promise<NativeInfo> {
+    const result = await this.call(cwd, "workspace", { operation: "info", arguments: { format: "json" } }, 20000, options);
     const parsed = nativeInfoSchema.safeParse(result.value);
     if (!parsed.success) throw new NativeError("identity_shape", "Unsupported native context identity response.");
     return parsed.data;
@@ -143,36 +243,33 @@ export class GortexClient implements NativePort {
 
   private healthRequests = new Map<string, Promise<DaemonHealth>>();
 
-  async daemonHealth(cwd: string): Promise<DaemonHealth> {
+  async daemonHealth(cwd: string, options: RequestOptions = {}): Promise<DaemonHealth> {
     const key = await realpath(cwd);
     const pending = this.healthRequests.get(key);
     if (pending) return pending;
-    const request = (async () => {
-      for (let attempt = 0; ; attempt++) {
-        const connection = await this.acquire(key);
-        try {
-          await connection.ready;
-          return await sampleDaemonHealth(connection.client);
-        } catch (error) {
-          const text = error instanceof Error ? error.message : "";
-          if (!isWarmingUpMessage(text) || attempt >= 2 || this.closed) throw error;
-          await delay(warmupRetryDelaysMs[attempt]);
-        } finally {
-          connection.active--;
-          if (!connection.client.transport && this.connections.get(key) === connection) this.connections.delete(key);
-        }
+    const request = this.serve(key, async () => {
+      const connection = await this.acquire(key);
+      try {
+        await connection.ready;
+        return await sampleDaemonHealth(connection.client);
+      } catch (error) {
+        if (isMcpTimeout(error)) throw new NativeError("timeout", "Gortex didn't send a health snapshot in time.");
+        throw error;
+      } finally {
+        connection.active--;
+        if (!connection.client.transport && this.connections.get(key) === connection) this.connections.delete(key);
       }
-    })().finally(() => { if (this.healthRequests.get(key) === request) this.healthRequests.delete(key); });
+    }, options, 5000).finally(() => { if (this.healthRequests.get(key) === request) this.healthRequests.delete(key); });
     this.healthRequests.set(key, request);
     return request;
   }
 
-  query(cwd: string, operation: Parameters<NativePort["query"]>[1], args: Record<string, unknown> = {}): Promise<{ value: unknown; meta: unknown }> {
-    if (operation === "index") return this.call(cwd, "workspace", { operation: "index", arguments: { format: "json", max_bytes: 12000 } });
-    if (operation === "search") return this.call(cwd, "search", { operation: "symbols", query: args.query, options: { workspace: args.workspace, repo: args.repo, limit: args.limit, paginate: true, cursor: args.cursor ?? undefined, expand: "off" }, output: { format: "json" } });
-    if (operation === "source") return this.call(cwd, "read", { operation: "source", target: { symbol: args.symbolId }, output: { format: "json", max_bytes: 12000 } });
-    if (operation === "impact") return this.call(cwd, "change", { operation: "impact", target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
-    return this.call(cwd, "relations", { operation, target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } });
+  query(cwd: string, operation: Parameters<NativePort["query"]>[1], args: Record<string, unknown> = {}, options: RequestOptions = {}): Promise<{ value: unknown; meta: unknown }> {
+    if (operation === "index") return this.call(cwd, "workspace", { operation: "index", arguments: { format: "json", max_bytes: 12000 } }, 20000, options);
+    if (operation === "search") return this.call(cwd, "search", { operation: "symbols", query: args.query, options: { workspace: args.workspace, repo: args.repo, limit: args.limit, paginate: true, cursor: args.cursor ?? undefined, expand: "off" }, output: { format: "json" } }, 20000, options);
+    if (operation === "source") return this.call(cwd, "read", { operation: "source", target: { symbol: args.symbolId }, output: { format: "json", max_bytes: 12000 } }, 20000, options);
+    if (operation === "impact") return this.call(cwd, "change", { operation: "impact", target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } }, 20000, options);
+    return this.call(cwd, "relations", { operation, target: { symbol: args.symbolId }, output: { format: "json", limit: 50, max_bytes: 12000 } }, 20000, options);
   }
 
   async repositoryIndexes(): Promise<unknown> {
@@ -181,12 +278,12 @@ export class GortexClient implements NativePort {
     catch { throw new NativeError("repository_index_shape", "Gortex returned an invalid repository index catalog."); }
   }
 
-  checkoutFamily(cwd: string): Promise<{ value: unknown; meta: unknown }> {
-    return this.call(cwd, "workspace", { operation: "checkouts", arguments: { family: cwd, format: "json", max_bytes: 256000 } });
+  checkoutFamily(cwd: string, options: RequestOptions = {}): Promise<{ value: unknown; meta: unknown }> {
+    return this.call(cwd, "workspace", { operation: "checkouts", arguments: { family: cwd, format: "json", max_bytes: 256000 } }, 20000, options);
   }
 
-  checkouts(cwd: string): Promise<{ value: unknown; meta: unknown }> {
-    return this.call(cwd, "workspace", { operation: "checkouts", arguments: { format: "json", max_bytes: 256000 } });
+  checkouts(cwd: string, options: RequestOptions = {}): Promise<{ value: unknown; meta: unknown }> {
+    return this.call(cwd, "workspace", { operation: "checkouts", arguments: { format: "json", max_bytes: 256000 } }, 20000, options);
   }
 
   async trackSupport(path: string): Promise<void> {

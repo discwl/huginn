@@ -133,7 +133,8 @@ export class RepositoryWorktrees {
     } catch (error) { gitError = message(error); }
     try {
       if (!commonDir) throw new Error("Cannot verify the Git family identity for this repository.");
-      const result = await this.native.checkoutFamily(path);
+      // An automatic request (the tab refreshes every 10 seconds): not sent while Gortex is refusing this repository.
+      const result = await this.native.checkoutFamily(path, { background: true });
       const meta = result.meta as Record<string, unknown> | null;
       if (meta?.truncated || meta?.partial || (meta?.freshness as { exact?: boolean } | undefined)?.exact === false) throw new Error("Gortex returned partial or substituted checkout evidence.");
       family = decodeWorktreeFamily(result.value, commonDir);

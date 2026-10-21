@@ -253,6 +253,7 @@ export class GortexUpdates {
     if (status.installation.method === "windows-release") warnings.push("Downloads the official Windows release, requires a matching SHA-256 checksum, and retains the previous executable beside the installed binary.");
     else warnings.push("Uses Gortex's detected native updater. Package managers control their available version and may install a newer release than the one shown. Agent configuration migration is disabled.");
     warnings.push("The plugin validates native responses and operation support. A breaking Gortex API change may require a plugin update; newer stable version numbers alone do not disable repository controls.");
+    warnings.push("Agent chats that are already open keep the previous Gortex tools until they're restarted. Diagnostics lists them after the update.");
     const preview = { id: randomUUID(), expiresAt: new Date(this.now() + 300_000).toISOString(), installation: status.installation, targetVersion: status.latestVersion, releaseUrl: status.releaseUrl, warnings };
     if (this.previews.size >= 40) this.previews.delete(this.previews.keys().next().value!);
     this.previews.set(preview.id, preview); return preview;

@@ -14,8 +14,10 @@ export type DaemonHealth = z.infer<typeof daemonHealthSchema>;
 export const hostHealthSchema = z.object({
   observedAt: z.string(), scope: z.literal("host"),
   // busy: Gortex is running but stalled on checkout work or out of request slots; not a failure.
-  state: z.enum(["available", "busy", "unavailable"]),
+  // paused: Gortex was refusing requests, so this refresh didn't ask it again (pausedUntil says until when).
+  state: z.enum(["available", "busy", "paused", "unavailable"]),
   health: daemonHealthSchema.nullable(), error: z.string().nullable(),
+  pausedUntil: z.string().nullable(),
 });
 export const indexSummarySchema = z.object({
   status: z.string(), health_score: z.number().min(0).max(100),

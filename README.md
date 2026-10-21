@@ -2,7 +2,7 @@
 
 Small maintenance tools for moving an existing GortexKit installation to native Gortex and keeping it current across machines. Requires PowerShell 7.2+ and Gortex 0.64.0+.
 
-Gortex now supplies the provider integrations and discovers linked worktrees. Paseo does not need this kit at runtime. A new machine can follow the [native setup steps](RUNBOOK.md#new-machine), including the deny settings for every provider; this repository is useful for migration, repeatable updates, and optional diagnostics.
+Gortex now supplies the provider integrations and discovers linked worktrees. Paseo does not need this kit at runtime. A new machine can follow the [native setup steps](RUNBOOK.md#new-machine), including the hook mode for every provider; this repository is useful for migration, repeatable updates, and optional diagnostics.
 
 ## What changed
 
@@ -49,11 +49,14 @@ Cleanup preserves unknown or customized artifacts and prints warnings for review
 # Optional: choose native providers or an instruction profile.
 .\Update-GortexAgents.ps1 -Agents codex,claude-code,copilot-cli,opencode -Profile core
 
+# Optional: change the hook mode for every provider instead of keeping the current one.
+.\Update-GortexAgents.ps1 -HookMode enrich
+
 # Preview without invoking Gortex or downloading anything.
 .\Update-GortexAgents.ps1 -Upgrade -WhatIf
 ```
 
-The updater delegates installation to Gortex, checks each agent's installation result, and runs `daemon status` and `doctor`. It installs **deny mode for Claude Code, Codex, Copilot CLI, and OpenCode**, including replacing an existing advisory/enrich setting. Open fresh provider sessions after refreshing, and review new or changed Codex hooks through `/hooks`.
+The updater delegates installation to Gortex, checks each agent's installation result, and runs `daemon status` and `doctor`. It **keeps the hook mode your existing Claude Code, Codex, and Copilot CLI hooks set** and applies it to every provider (Gortex's native install uses one mode for all). If those hooks set different modes, it stops and asks for `-HookMode`; a machine without Gortex hooks gets deny, Gortex's default. Use `-HookMode enrich` or `-HookMode deny` to change it. With deny, agents can't read indexed source directly, so a stuck Gortex blocks them; enrich never blocks. Open fresh provider sessions after refreshing, and review new or changed Codex hooks through `/hooks`.
 
 For the official default Windows installation, `-Upgrade` uses the official Windows installer because v0.64.0's upgrade detector misses that location. Other installations use `gortex upgrade --run`. Package managers and custom paths are covered in the [runbook](RUNBOOK.md).
 

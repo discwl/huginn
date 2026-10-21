@@ -1,0 +1,128 @@
+import { lstat, open, readdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { resolveHostExecutable } from "./host-executable.ts";
+import { runProcess } from "./process-runner.ts";
+
+/** A worktree that appeared or went away: from Paseo's workspace events, or Git's own worktree records. */
+export interface WorktreeChange { path: string; change: "added" | "removed"; at: number; source: "paseo" | "git" }
+
+/**
+ * What diagnostics read besides Gortex's own answers: none of it sends Gortex a request, so it still works, and
+ * adds nothing, while Gortex is stuck.
+ */
+export interface DiagnosticsEvidence {
+  /** The end of Gortex's daemon log (next to its socket), or null when it can't be read. */
+  daemonLog(socket: string | null): Promise<string | null>;
+  /** When the Gortex executable on this host was last replaced (ms since the epoch), or null. */
+  executableChangedAt(): Promise<number | null>;
+  /** Worktrees of these repositories added or removed since `since`. */
+  worktreeChanges(repositories: string[], since: number): Promise<WorktreeChange[]>;
+}
+
+const key = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
+
+/** Worktrees Paseo creates and archives while this plugin runs, from its workspace lifecycle events. */
+export class CheckoutActivity {
+  private changes: WorktreeChange[] = [];
+  private worktrees = new Set<string>();
+  private now: () => number;
+  constructor(now: () => number = Date.now) { this.now = now; }
+
+  /** A new workspace whose folder is a linked Git worktree (its .git is a file, not a folder). */
+  async created(cwd: string): Promise<void> {
+    const git = await lstat(join(cwd, ".git")).catch(() => null);
+    if (!git?.isFile()) return;
+    this.worktrees.add(key(cwd));
+    this.record({ path: cwd, change: "added", at: this.now(), source: "paseo" });
+  }
+
+  /** An archived workspace that was a worktree: one Paseo created here, or one whose folder is already gone. */
+  async archived(cwd: string): Promise<void> {
+    const known = this.worktrees.delete(key(cwd));
+    if (!known && await lstat(cwd).then(() => true, () => false)) return;
+    this.record({ path: cwd, change: "removed", at: this.now(), source: "paseo" });
+  }
+
+  recent(since: number): WorktreeChange[] { return this.changes.filter(change => change.at >= since); }
+
+  private record(change: WorktreeChange): void {
+    this.changes.push(change);
+    if (this.changes.length > 50) this.changes.splice(0, this.changes.length - 50);
+  }
+}
+
+/** The last `bytes` of a file, starting at a whole line. */
+async function tail(path: string, bytes: number): Promise<string> {
+  const handle = await open(path, "r");
+  try {
+    const { size } = await handle.stat();
+    const start = Math.max(0, size - bytes);
+    const buffer = Buffer.alloc(size - start);
+    await handle.read(buffer, 0, buffer.length, start);
+    const text = buffer.toString("utf8");
+    return start > 0 ? text.slice(text.indexOf("\n") + 1) : text;
+  } finally { await handle.close(); }
+}
+
+/** Worktrees Git created since `since`, from the entries in the repository's shared worktrees folder. */
+async function gitWorktreesAdded(repository: string, since: number): Promise<WorktreeChange[]> {
+  const common = resolve(repository, (await runProcess("git", ["rev-parse", "--git-common-dir"], repository, { timeoutMs: 10_000, maxBytes: 16_000 })).trim());
+  const folder = join(common, "worktrees");
+  const changes: WorktreeChange[] = [];
+  for (const entry of await readdir(folder, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) continue;
+    const record = join(folder, entry.name);
+    const info = await stat(record).catch(() => null);
+    const at = info ? info.birthtimeMs || info.ctimeMs : 0;
+    if (at < since) continue;
+    // gitdir holds the path of the worktree's own .git file.
+    const gitdir = (await readFile(join(record, "gitdir"), "utf8").catch(() => "")).trim();
+    changes.push({ path: gitdir ? dirname(gitdir) : record, change: "added", at, source: "git" });
+  }
+  return changes;
+}
+
+export function hostEvidence(activity: CheckoutActivity): DiagnosticsEvidence {
+  return {
+    async daemonLog(socket) {
+      const file = socket ? join(dirname(socket), "daemon.log") : join(homedir(), ".gortex", "cache", "daemon.log");
+      return tail(file, 1024 * 1024).catch(() => null);
+    },
+    async executableChangedAt() {
+      try {
+        const info = await stat(await resolveHostExecutable("gortex"));
+        return Math.max(info.mtimeMs, info.birthtimeMs);
+      } catch { return null; }
+    },
+    async worktreeChanges(repositories, since) {
+      const found = [...activity.recent(since)];
+      for (const repository of repositories) found.push(...await gitWorktreesAdded(repository, since).catch(() => []));
+      const unique = new Map<string, WorktreeChange>();
+      for (const change of found) {
+        const id = `${change.change}:${key(change.path.replace(/[\\/]+$/, ""))}`;
+        if (!unique.has(id) || change.source === "paseo") unique.set(id, change);
+      }
+      return [...unique.values()].sort((a, b) => b.at - a.at);
+    },
+  };
+}
+
+/** Requests the daemon log says waited out Gortex's per-request limit since `since`. */
+export function requestTimeouts(log: string, since: number): { count: number; deadlineSeconds: number | null; sessions: Map<string, number>; latest: number[] } {
+  const sessions = new Map<string, number>(), times: number[] = [];
+  let deadlineSeconds: number | null = null;
+  for (const line of log.split(/\r?\n/)) {
+    if (!line.includes("mcp request lifetime ended")) continue;
+    let entry: { msg?: unknown; ts?: unknown; outcome?: unknown; session_id?: unknown; deadline?: unknown };
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.msg !== "daemon: mcp request lifetime ended" || entry.outcome !== "deadline" || typeof entry.ts !== "number") continue;
+    const at = entry.ts * 1000;
+    if (at < since) continue;
+    times.push(at);
+    if (typeof entry.deadline === "number") deadlineSeconds = entry.deadline;
+    const session = typeof entry.session_id === "string" ? entry.session_id : "unknown";
+    sessions.set(session, (sessions.get(session) ?? 0) + 1);
+  }
+  return { count: times.length, deadlineSeconds, sessions, latest: times.slice(-5) };
+}

@@ -90,7 +90,7 @@ test("real Git family is discovered without tracking writes; native errors prese
     await runProcess("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture", "--quiet"], repo);
     await runProcess("git", ["worktree", "add", "--quiet", "-b", "feature", worktree], repo);
     let calls = 0;
-    const native = { repositoryIndexes: async () => [{ path: repo, indexed: true, stale: false }], assignments: async () => [{ repo: "repo", path: repo, workspace: "different-workspace", project: "repo", source: "global" }], checkoutFamily: async (path: string) => { calls++; assert.equal(path, await realpath(repo)); throw new Error("native checkout discovery pending"); } };
+    const native = { repositoryIndexes: async () => [{ path: repo, indexed: true, stale: false }], assignments: async () => [{ repo: "repo", path: repo, workspace: "different-workspace", project: "repo", source: "global" }], checkoutFamily: async (path: string, options?: { background?: boolean }) => { calls++; assert.equal(path, await realpath(repo)); assert.equal(options?.background, true, "the 10-second refresh is an automatic request"); throw new Error("native checkout discovery pending"); } };
     const service = new RepositoryWorktrees(native);
     const [a, b] = await Promise.all([service.list(repo), service.list(repo)]);
     assert.equal(calls, 1); assert.deepEqual(a, b); worktreePageSchema.parse(a);

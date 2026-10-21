@@ -2,6 +2,8 @@ export interface DaemonSession { id: string; client: string; version: string; co
 export interface DaemonStatus {
   running: boolean; ready: boolean; warming: boolean;
   version: string | null; pid: number | null; uptime: string | null; state: string | null;
+  /** The daemon's socket path; its log is written beside it. */
+  socket: string | null;
   sessions: DaemonSession[];
 }
 
@@ -33,7 +35,7 @@ export function parseDaemonStatus(text: string): DaemonStatus {
     ready: state !== null && /^ready\b/.test(state),
     warming: state !== null && /warming up/.test(state),
     version: field(text, "daemon"), pid: pid !== null && /^\d+$/.test(pid) ? Number(pid) : null,
-    uptime: field(text, "uptime"), state, sessions,
+    uptime: field(text, "uptime"), state, socket: field(text, "socket"), sessions,
   };
 }
 

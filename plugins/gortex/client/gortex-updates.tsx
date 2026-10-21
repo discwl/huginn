@@ -85,6 +85,7 @@ function HostUpdates({ host, theme }: Props) {
     {result && <>
       <Badge theme={theme} label={result.outcome === "updated" ? "Update verified" : result.outcome === "failed" ? "Update did not start" : "Update needs attention"} tone={result.outcome === "updated" ? "success" : "warning"} />
       {result.installedVersion && <Notice theme={theme} text={`Installed binary: ${result.installedVersion.replace(/\+.*$/, "")} · ${result.daemonReachable ? "Daemon reachable" : "Daemon availability not verified"}`} />}
+      {result.outcome === "updated" && <Notice theme={theme} text="Restart agent chats that were open during the update so they get the new Gortex tools. Diagnostics lists them." />}
       {result.error && <Notice theme={theme} error text={result.error} />}
       {result.backupPath && <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>Previous executable: {result.backupPath}</Text>}
       {result.outcome !== "updated" && <Action theme={theme} title="Review current state" icon="RefreshCw" disabled={locked} onPress={checkUpdates} />}

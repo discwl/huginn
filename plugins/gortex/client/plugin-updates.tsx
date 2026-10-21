@@ -51,7 +51,7 @@ export function PluginUpdatesPanel({ host, theme }: Pick<PluginSurfaceProps, "ho
         {!confirming && <View style={{ flexDirection: "row" }}><Action title="Update plugin" icon="Download" primary theme={theme} onPress={() => setConfirming(true)} /></View>}
         {confirming && <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, padding: 12, gap: 8 }}>
           <Text style={{ color: theme.colors.foreground, fontWeight: "600" }}>Update the Gortex plugin on {host.label}?</Text>
-          <Notice theme={theme} text="Runs paseo plugin update gortex. Paseo installs its dependencies, builds it, and reloads it for every client of this host. Gortex itself, its indexes and your settings are not changed." />
+          <Notice theme={theme} text="Runs paseo plugin update gortex --yes. Paseo installs its dependencies, builds it, and reloads it for every client of this host. Gortex itself, its indexes and your settings are not changed." />
           <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
             <Action title={start.isPending ? "Starting…" : "Confirm update"} icon="Check" primary theme={theme} disabled={start.isPending} onPress={() => start.mutate(data.target!)} />
             <Button title="Cancel" theme={theme} disabled={start.isPending} onPress={() => setConfirming(false)} />
@@ -59,7 +59,7 @@ export function PluginUpdatesPanel({ host, theme }: Pick<PluginSurfaceProps, "ho
         </View>}
       </>}
       {data.state === "current" && <Notice theme={theme} text={`Installed revision ${shortRevision(data.current)} is the latest.`} />}
-      {data.state === "local" && <Notice theme={theme} text="Installed from a folder on this host, so Paseo can't update it from Git. Pull the latest changes into that folder, then choose Reload in Settings → Plugins. To get one-click updates, reinstall with: paseo plugin add discwl/huginn:plugins/gortex --ref main" />}
+      {data.state === "local" && <Notice theme={theme} text="Installed from a folder on this host, so Paseo can't update it from Git. Pull the latest changes into that folder, then choose Reload in Settings → Plugins. To get one-click updates, reinstall from Git: paseo plugin remove gortex, then paseo plugin add git:https://github.com/discwl/huginn.git:plugins/gortex --ref main" />}
       {data.state === "installed-newer" && <Notice theme={theme} text={`Installed ${shortRevision(data.current)} is newer than the tracked branch (${shortRevision(data.target)}); keeping it.`} />}
       {(data.state === "error" || data.state === "unavailable") && data.error && <Notice theme={theme} error text={data.error} />}
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>Checked {dateTime(data.checkedAt)}</Text>

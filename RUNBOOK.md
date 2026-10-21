@@ -17,7 +17,7 @@ This kit targets Gortex 0.64.0+ and PowerShell 7.2+. Use the same steps on each 
    gortex install --yes --hook-mode=deny
    ```
 
-   Add `--agents=codex,claude-code,copilot-cli,opencode` if provider autodetection does not select the intended hosts. Native install preserves unrelated configuration while refreshing its managed integrations; this kit never passes `--force`.
+   This is deny mode, Gortex's default: agents can't read indexed source directly, so a stuck Gortex blocks them. To never block, use `enrich` in both places instead. Add `--agents=codex,claude-code,copilot-cli,opencode` if provider autodetection does not select the intended hosts. Native install preserves unrelated configuration while refreshing its managed integrations; this kit never passes `--force`.
 
 3. Start the first native provider/MCP session so Gortex's MCP startup can make the daemon available. In Codex, use `/hooks` to review and enable new or changed hooks. Then inspect health:
 
@@ -86,18 +86,18 @@ Every changed file is backed up before modification; removed files and recognize
 .\Update-GortexAgents.ps1 -Upgrade
 ```
 
-If the binary is already current, omit `-Upgrade`. Both paths always run `gortex install --yes --json --hook-mode=deny` with Codex's mode set to `deny`, inspect agent results, then run `daemon status` and `doctor`. An installer exit code of zero alone is insufficient: an adapter can report that it was not configured, and the wrapper treats that as a failure.
+If the binary is already current, omit `-Upgrade`. Both paths always run `gortex install --yes --json --hook-mode=<mode>` with Codex's mode set to the same `<mode>`, inspect agent results, then run `daemon status` and `doctor`. An installer exit code of zero alone is insufficient: an adapter can report that it was not configured, and the wrapper treats that as a failure.
 
-The existing native instruction profile stays selected unless `-Profile core`, `localization`, or `full` is supplied. **The kit policy is deny for all four providers**, including when existing configuration uses advisory/enrich mode:
+The existing native instruction profile stays selected unless `-Profile core`, `localization`, or `full` is supplied. **The hook mode stays what the existing hooks use** (`-HookMode keep`, the default): the explicit `--mode` of the Claude Code, Codex, and Copilot CLI hook commands. A hook without an explicit mode, such as Copilot CLI's native default, doesn't count. When the explicit modes disagree, the updater stops before installing and asks for `-HookMode deny`, `enrich`, `consult-unlock`, or `nudge`. A machine with no Gortex hooks yet gets deny, Gortex's default. The chosen mode applies to every provider:
 
-| Provider | Native deny configuration |
+| Provider | How the mode is installed |
 | --- | --- |
-| Claude Code | `install --hook-mode=deny` |
-| Codex | `GORTEX_CODEX_HOOK_MODE=deny` during native installation |
-| Copilot CLI | The native `--agent=copilot-cli` hook uses Gortex's deny default |
-| OpenCode | `install --hook-mode=deny` configures the native plugin |
+| Claude Code | `install --hook-mode=<mode>` |
+| Codex | `GORTEX_CODEX_HOOK_MODE=<mode>` during native installation |
+| Copilot CLI | The native `--agent=copilot-cli` hook; Gortex's default is deny |
+| OpenCode | `install --hook-mode=<mode>` configures the native plugin |
 
-The updater restores the caller's environment afterward; Codex's installed hook commands keep their explicit `--mode=deny`. It does not inspect or reproduce legacy mode settings. When running native install manually in a fresh shell, include both the Codex environment setting and `--hook-mode=deny`, as shown in the new-machine steps. A plain native install otherwise uses Codex's advisory default, emitted as `enrich`.
+With deny, agents can't read indexed source directly, so while Gortex is stuck they can't read it at all; enrich never blocks and adds Gortex's context after each read. The updater restores the caller's environment afterward; Codex's installed hook commands keep their explicit `--mode`. When running native install manually in a fresh shell, include both the Codex environment setting and `--hook-mode`, as shown in the new-machine steps. A plain native install otherwise uses Codex's advisory default, emitted as `enrich`.
 
 New or changed Codex hooks may need trust approval before doctor is healthy. Read the error, open Codex `/hooks`, review the hooks, then rerun the refresh/check. Start fresh sessions in every provider so instructions, skills, and MCP configuration reload.
 
