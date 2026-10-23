@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { GortexUpdates, compareVersions, parseInstalledVersion, readLatestRelease, verifiedWindowsArchive, replaceWindowsBinary, type UpdatePort } from "./gortex-updates.ts";
+import { GortexUpdates, compareVersions, parseInstalledVersion, readLatestRelease, scoopAppFolder, scoopBlockers, verifiedWindowsArchive, replaceWindowsBinary, type UpdatePort } from "./gortex-updates.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { GortexClient } from "./gortex-client.ts";
 
@@ -101,6 +101,33 @@ test("download failures stay write-free; lost install responses and restart fail
     if (outcome === "lost-response") assert.throws(() => f.lock.acquire(), /verif|update/i);
     await f.service.close();
   }
+});
+
+test("Scoop with Gortex still running refuses the update before anything changes", async () => {
+  // The daemon doesn't count (Gortex's own upgrade stops it first); an agent chat's Gortex connection does.
+  const shim = "C:\\Users\\dev\\scoop\\shims\\gortex.exe", app = "C:\\Users\\dev\\scoop\\apps\\gortex\\current\\gortex.exe";
+  assert.equal(scoopAppFolder(shim), "c:\\users\\dev\\scoop\\apps\\gortex\\");
+  assert.equal(scoopAppFolder("C:\\Users\\dev\\AppData\\Local\\Programs\\gortex\\gortex.exe"), null);
+  const running = [{ path: app, commandLine: `"${app}" daemon start --detached` }, { path: app, commandLine: `"${app}" mcp --proxy --tools compact` }, { path: "C:\\Other\\gortex.exe", commandLine: "gortex mcp" }];
+  assert.equal(scoopBlockers(shim, running), 1);
+  assert.equal(scoopBlockers("C:\\Tools\\gortex.exe", running), 0, "not installed with Scoop");
+  // A refusal in before() comes after this plugin's connections close but before anything is attempted.
+  const lock = new RepositoryAdminLock();
+  let installs = 0;
+  const port: UpdatePort = {
+    inspect: async () => ({ binary: shim, version: "v0.64.4+abc", fingerprint: "f", method: "native", reason: null }),
+    latest: async () => ({ version: "v0.64.10", url: "https://github.com/zzet/gortex/releases/tag/v0.64.10" }),
+    install: async (_installation, _release, _stage, activate) => activate(async () => { installs++; throw new Error("not reached"); }, async () => { throw new Error("Gortex was installed with Scoop, which won't update it while it runs"); }),
+  };
+  const service = new GortexUpdates(port, () => {}, lock, async work => work());
+  const preview = await service.preview();
+  assert.ok(preview.warnings.some(warning => /Scoop won't update Gortex while it runs/.test(warning)));
+  const result = await done(service, service.apply(preview.id).id);
+  assert.equal(result.outcome, "failed");
+  assert.match(result.error!, /installed with Scoop/);
+  assert.equal(installs, 0);
+  lock.acquire()(); // Administration isn't stopped: nothing needs verifying.
+  await service.close();
 });
 
 test("host services do not share releases or jobs, and repository administration blocks updates", async () => {
