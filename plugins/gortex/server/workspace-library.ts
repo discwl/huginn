@@ -2,7 +2,7 @@ import { lstat, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
-import { busyMessage, isBusyMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
+import { busyMessage, isBusyMessage, isNotLoadedMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
 import { symbolSchema, type Catalog, type Inspection, type NativeAssignment, type Repository, type RepositoryContext, type SearchPage } from "../shared/models.ts";
 import type { NativePort, RequestOptions } from "./gortex-client.ts";
 import { isWaiting, NativeError } from "./native-response.ts";
@@ -55,7 +55,7 @@ export class WorkspaceLibrary {
       return repository;
     } catch (error) {
       const text = message(error);
-      if (starting && (text === warmingUpMessage || isWaiting(error))) return this.loadingRow(row);
+      if (starting && (text === warmingUpMessage || isWaiting(error) || isNotLoadedMessage(text))) return this.loadingRow(row);
       if (text === warmingUpMessage || text === busyMessage || isWaiting(error)) {
         // A verified identity from this session stays usable while discovery catches up.
         const previous = this.resolved.get(repositoryPathKey(row.path));

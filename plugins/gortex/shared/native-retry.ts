@@ -16,6 +16,14 @@ const busyPatterns = [/\bdispatcher is busy\b/i, /-32002\b/];
 // Gortex 0.64.9's proxy, on the first request after the daemon restarted: "The request was not executed; … retry" (-32097).
 const resetPatterns = [/\bdaemon restarted\b/i, /\bsession state was reset\b/i, /-32097\b/];
 
+// While Gortex starts, it answers "repository not tracked" for a repository it hasn't loaded yet (0.64.10, 2026-10-23).
+const notLoadedPatterns = [/\brepository not tracked\b/i];
+
+/** Gortex doesn't know this repository yet. Only the daemon's state tells a startup from a repository it doesn't track. */
+export function isNotLoadedMessage(message: string): boolean {
+  return notLoadedPatterns.some(pattern => pattern.test(message));
+}
+
 export function isBusyMessage(message: string): boolean {
   return busyPatterns.some(pattern => pattern.test(message));
 }
@@ -39,6 +47,9 @@ export const busyMessage = "Gortex is handling as many requests as it allows at 
 
 /** For a daemon that started minutes ago, when its own retries ran out. */
 export const warmingUpMessage = "Gortex started a few minutes ago and is still discovering checkouts, so it couldn't answer for this repository yet. That usually takes seconds to a few minutes; refresh in a moment.";
+
+/** Host health while Gortex starts, when no repository could carry the request yet. */
+export const startingMessage = "Gortex is still starting, and refuses requests for repositories until it has loaded them. That usually takes seconds to a few minutes.";
 
 /** A daemon this young is still discovering checkouts after its start, so its refusals are waited out. */
 export const warmupWindowSeconds = 300;
