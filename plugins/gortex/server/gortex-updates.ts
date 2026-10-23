@@ -106,7 +106,10 @@ export async function verifiedWindowsArchive(directory: string, version: string,
     try { await download(`${releaseRoot}/download/${version}/checksums.txt`, checksums, 1024 * 1024, fetcher); }
     catch { throw new Error("The official release checksum could not be downloaded. Nothing was installed."); }
     const rows = (await readFile(checksums, "utf8")).split(/\r?\n/).map(line => /^([a-fA-F0-9]{64})\s+\*?(\S+)\s*$/.exec(line)).filter(row => row?.[2] === "gortex_windows_amd64.zip");
-    if (rows.length !== 1) throw new Error("Release checksum is missing or ambiguous. Nothing was installed.");
+    // Gortex builds for Windows after its other platforms: for about 20 minutes after a release (on 2026-10-23), its
+    // checksums listed no Windows download.
+    if (rows.length === 0) throw new Error(`Gortex ${version} has no Windows download yet. It's published after the other platforms, usually within half an hour of the release. Nothing was installed; try again later.`);
+    if (rows.length !== 1) throw new Error("Release checksum is ambiguous. Nothing was installed.");
     const actual = await download(`${releaseRoot}/download/${version}/gortex_windows_amd64.zip`, archive, 256 * 1024 * 1024, fetcher);
     if (actual !== rows[0]![1]!.toLowerCase()) throw new Error("Release checksum verification failed. Nothing was installed.");
     return archive;
