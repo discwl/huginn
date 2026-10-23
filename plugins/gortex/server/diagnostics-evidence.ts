@@ -14,6 +14,8 @@ export interface WorktreeChange { path: string; change: "added" | "removed"; at:
 export interface DiagnosticsEvidence {
   /** The end of Gortex's daemon log (next to its socket), or null when it can't be read. */
   daemonLog(socket: string | null): Promise<string | null>;
+  /** Gortex 0.64.9's crash log (daemon.stderr.log beside the daemon log) and when it was last written, or null. */
+  crashLog(socket: string | null): Promise<{ text: string; writtenAt: number } | null>;
   /** When the Gortex executable on this host was last replaced (ms since the epoch), or null. */
   executableChangedAt(): Promise<number | null>;
   /** Worktrees of these repositories added or removed since `since`. */
@@ -83,17 +85,32 @@ async function gitWorktreesAdded(repository: string, since: number): Promise<Wor
   return changes;
 }
 
+const logFolder = (socket: string | null) => socket ? dirname(socket) : join(homedir(), ".gortex", "cache");
+
+/**
+ * When an executable was installed: the time the file was created here. Its modified time can't be used, because an
+ * installer can keep the release archive's time (on 2026-10-23 that was hours in the future); ctime stands in where
+ * the file system records no creation time.
+ */
+export function installTime(info: { birthtimeMs: number; ctimeMs: number }, now: number): number {
+  return Math.min(info.birthtimeMs > 0 ? info.birthtimeMs : info.ctimeMs, now);
+}
+
 export function hostEvidence(activity: CheckoutActivity): DiagnosticsEvidence {
   return {
     async daemonLog(socket) {
-      const file = socket ? join(dirname(socket), "daemon.log") : join(homedir(), ".gortex", "cache", "daemon.log");
-      return tail(file, 1024 * 1024).catch(() => null);
+      return tail(join(logFolder(socket), "daemon.log"), 1024 * 1024).catch(() => null);
+    },
+    async crashLog(socket) {
+      const file = join(logFolder(socket), "daemon.stderr.log");
+      try {
+        const info = await stat(file);
+        return { text: await tail(file, 256 * 1024), writtenAt: info.mtimeMs };
+      } catch { return null; }
     },
     async executableChangedAt() {
-      try {
-        const info = await stat(await resolveHostExecutable("gortex"));
-        return Math.max(info.mtimeMs, info.birthtimeMs);
-      } catch { return null; }
+      try { return installTime(await stat(await resolveHostExecutable("gortex")), Date.now()); }
+      catch { return null; }
     },
     async worktreeChanges(repositories, since) {
       const found = [...activity.recent(since)];

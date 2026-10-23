@@ -13,19 +13,26 @@ const stallPatterns = [
   /\bwarming up\b/i,
 ];
 const busyPatterns = [/\bdispatcher is busy\b/i, /-32002\b/];
+// Gortex 0.64.9's proxy, on the first request after the daemon restarted: "The request was not executed; … retry" (-32097).
+const resetPatterns = [/\bdaemon restarted\b/i, /\bsession state was reset\b/i, /-32097\b/];
 
 export function isBusyMessage(message: string): boolean {
   return busyPatterns.some(pattern => pattern.test(message));
 }
 
-/** Gortex is still discovering a checkout (not out of request slots). */
-export function isStallMessage(message: string): boolean {
-  return !isBusyMessage(message) && stallPatterns.some(pattern => pattern.test(message));
+/** The daemon restarted under this connection, so the request wasn't run and can be sent again. */
+export function isRestartMessage(message: string): boolean {
+  return resetPatterns.some(pattern => pattern.test(message));
 }
 
-/** Either kind: Gortex is running, but didn't serve this request. */
+/** Gortex is still discovering a checkout (not out of request slots, and not a restart). */
+export function isStallMessage(message: string): boolean {
+  return !isBusyMessage(message) && !isRestartMessage(message) && stallPatterns.some(pattern => pattern.test(message));
+}
+
+/** Any of these: Gortex is running, but didn't serve this request. */
 export function isWarmingUpMessage(message: string): boolean {
-  return isBusyMessage(message) || stallPatterns.some(pattern => pattern.test(message));
+  return isBusyMessage(message) || isRestartMessage(message) || stallPatterns.some(pattern => pattern.test(message));
 }
 
 export const busyMessage = "Gortex is handling as many requests as it allows at once (8 by default), so this one was refused. It usually clears in a moment; close idle agent sessions, or raise GORTEX_MCP_MAX_CONCURRENT_DISPATCHES on this host.";

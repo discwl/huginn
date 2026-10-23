@@ -26,7 +26,8 @@ export const repositorySchema = z.object({
   name: z.string(), path: pathSchema, declaredWorkspace: z.string(), declaredProject: z.string(), assignmentSource: z.string(),
   workspaceId: z.string().nullable(), projectId: z.string().nullable(), graphName: z.string().nullable(),
   origin: z.enum(["gortex", "paseo"]).optional(),
-  state: z.enum(["resolved", "unavailable", "untracked", "worktree", "unsupported"]), error: z.string().nullable(),
+  // loading: tracked, but Gortex is still loading it after starting (reported from Gortex 0.64.9 on).
+  state: z.enum(["resolved", "loading", "unavailable", "untracked", "worktree", "unsupported"]), error: z.string().nullable(),
   // Paseo-only candidates: false for a plain folder (no .git), which Gortex can still index.
   git: z.boolean().optional(),
 });

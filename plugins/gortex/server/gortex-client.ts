@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { homedir } from "node:os";
 import { requireNativeCompatibility, requireTrackCliSupport } from "../shared/native-compatibility.ts";
-import { isBusyMessage, isStallMessage, pausedMessage, stalledMessage, warmupRetryDelaysMs, warmupWindowSeconds } from "../shared/native-retry.ts";
+import { isBusyMessage, isRestartMessage, isStallMessage, pausedMessage, stalledMessage, warmupRetryDelaysMs, warmupWindowSeconds } from "../shared/native-retry.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
@@ -10,7 +10,7 @@ import { nativeAssignmentSchema, nativeInfoSchema, type NativeAssignment, type N
 import { decodeNativeResult, NativeError } from "./native-response.ts";
 import { runProcess } from "./process-runner.ts";
 import { resolveHostExecutable } from "./host-executable.ts";
-import { parseDaemonStatus, uptimeSeconds } from "./daemon-status.ts";
+import { parseDaemonStatus, uptimeSeconds, type DaemonStatus } from "./daemon-status.ts";
 import { StallGuard } from "./stall-guard.ts";
 
 interface Connection { client: Client; ready: Promise<void>; active: number; touched: number }
@@ -21,6 +21,8 @@ interface Connection { client: Client; ready: Promise<void>; active: number; tou
 export interface RequestOptions { background?: boolean; single?: boolean }
 export interface NativePort {
   assignments(): Promise<NativeAssignment[]>;
+  /** Whether Gortex is starting, and the repositories it is still loading (reported from 0.64.9 on). */
+  startup?(): Promise<{ starting: boolean; loading: string[] }>;
   info(cwd: string, options?: RequestOptions): Promise<NativeInfo>;
   version(): Promise<string>;
   query(cwd: string, operation: "index" | "search" | "source" | "callers" | "dependencies" | "usages" | "implementations" | "impact", args?: Record<string, unknown>, options?: RequestOptions): Promise<{ value: unknown; meta: unknown }>;
@@ -31,7 +33,15 @@ export interface GortexClientOptions {
   wait?: (ms: number) => Promise<unknown>;
   /** Whether the daemon started recently enough that its refusals are still start-up discovery. */
   warmingUp?: () => Promise<boolean>;
+  /** Tests: stands in for `gortex daemon status`. */
+  daemonStatus?: () => Promise<DaemonStatus | null>;
   stalls?: StallGuard;
+}
+
+/** Still starting: warming up, within minutes of the start, or (Gortex 0.64.9 and later) still loading repositories. */
+export function isStarting(status: DaemonStatus): boolean {
+  const uptime = uptimeSeconds(status.uptime);
+  return status.warming || (uptime !== null && uptime < warmupWindowSeconds) || status.repos.some(repo => repo.state === "loading");
 }
 
 import { sampleDaemonHealth } from "./health-snapshot.ts";
@@ -42,12 +52,16 @@ import type { DaemonHealth } from "../shared/health-models.ts";
 const QUICK_REFUSAL_MS = 2000, QUICK_RETRY_MS = 400;
 
 const isMcpTimeout = (error: unknown) => (error as { code?: unknown } | null)?.code === -32001 || /\brequest timed out\b/i.test(error instanceof Error ? error.message : "");
+// Gortex 0.64.9's proxy answers the first request after a daemon restart with -32097: it wasn't run and can be retried.
+const isSessionReset = (error: unknown) => (error as { code?: unknown } | null)?.code === -32097 || isRestartMessage(error instanceof Error ? error.message : "");
+const sessionResetMessage = "Gortex's daemon restarted, so this request wasn't run.";
 
 /** Which kind of refusal an error is, or null for an ordinary failure. */
-function refusal(error: unknown): "busy" | "stall" | "timeout" | null {
+function refusal(error: unknown): "busy" | "reset" | "stall" | "timeout" | null {
   const text = error instanceof Error ? error.message : "";
   const code = (error as { code?: unknown } | null)?.code;
   if (isBusyMessage(text)) return "busy";
+  if (code === "session_reset" || isRestartMessage(text)) return "reset";
   if (code === "timeout" || code === "health_timeout") return "timeout";
   return isStallMessage(text) ? "stall" : null;
 }
@@ -62,7 +76,7 @@ export class GortexClient implements NativePort {
   private now: () => number;
   private wait: (ms: number) => Promise<unknown>;
   private stalls: StallGuard;
-  private warmCheck: { at: number; value: Promise<boolean> } | null = null;
+  private statusCheck: { at: number; value: Promise<DaemonStatus | null> } | null = null;
   constructor(binary = "gortex", options: GortexClientOptions = {}) {
     this.binary = binary; this.options = options;
     this.now = options.now ?? Date.now;
@@ -132,18 +146,26 @@ export class GortexClient implements NativePort {
     } finally { unlock(); }
   }
 
-  /** Whether the daemon started within the last few minutes, from `gortex daemon status` (cached for 10 seconds). */
-  private warmingUp(): Promise<boolean> {
+  /** `gortex daemon status`, read at most every 10 seconds; null when it can't be read. */
+  private daemonStatus(): Promise<DaemonStatus | null> {
     const now = this.now();
-    if (this.warmCheck && now - this.warmCheck.at < 10_000) return this.warmCheck.value;
-    const value = this.options.warmingUp
-      ? this.options.warmingUp().catch(() => false)
-      : runProcess(this.binary, ["daemon", "status"], homedir(), { timeoutMs: 10_000, maxBytes: 256 * 1024 }).then(text => {
-        const status = parseDaemonStatus(text), uptime = uptimeSeconds(status.uptime);
-        return status.warming || (uptime !== null && uptime < warmupWindowSeconds);
-      }, () => false);
-    this.warmCheck = { at: now, value };
+    if (this.statusCheck && now - this.statusCheck.at < 10_000) return this.statusCheck.value;
+    const value = runProcess(this.binary, ["daemon", "status"], homedir(), { timeoutMs: 10_000, maxBytes: 256 * 1024 }).then(parseDaemonStatus, () => null);
+    this.statusCheck = { at: now, value };
     return value;
+  }
+
+  /** Whether the daemon is still starting: warming up, within minutes of its start, or loading repositories (0.64.9). */
+  private async warmingUp(): Promise<boolean> {
+    if (this.options.warmingUp) return this.options.warmingUp().catch(() => false);
+    const status = await this.daemonStatus();
+    return status !== null && isStarting(status);
+  }
+
+  /** Whether Gortex is starting, and the repositories it reports as still loading (Gortex 0.64.9 and later). */
+  async startup(): Promise<{ starting: boolean; loading: string[] }> {
+    const status = this.options.daemonStatus ? await this.options.daemonStatus().catch(() => null) : await this.daemonStatus();
+    return { starting: status !== null && isStarting(status), loading: (status?.repos ?? []).filter(repo => repo.state === "loading").map(repo => repo.path) };
   }
 
   /**
@@ -167,6 +189,12 @@ export class GortexClient implements NativePort {
         const kind = refusal(error);
         if (!kind || this.closed) throw error;
         const scheduled = attempt < warmupRetryDelaysMs.length;
+        // A restart left the request unrun: send it again, even a single-try request, once.
+        if (kind === "reset") {
+          if (attempt >= (options.single ? 1 : warmupRetryDelaysMs.length)) throw error;
+          await this.wait(warmupRetryDelaysMs[attempt]);
+          continue;
+        }
         if (kind === "busy") {
           if (!scheduled) throw error;
           await this.wait(warmupRetryDelaysMs[attempt]);
@@ -213,6 +241,7 @@ export class GortexClient implements NativePort {
       if (this.connections.get(key) === connection) this.connections.delete(key);
       await connection.client.close().catch(() => {});
       if (error instanceof NativeError) throw error;
+      if (isSessionReset(error)) throw new NativeError("session_reset", sessionResetMessage);
       if (isMcpTimeout(error)) throw new NativeError("timeout", `Gortex didn't answer within ${Math.round(timeout / 1000)} seconds.`);
       throw new NativeError("mcp_unavailable", "Gortex MCP request failed. Verify the existing daemon is reachable, then refresh. The plugin does not start or restart it.");
     } finally { connection.active--; }
@@ -253,6 +282,7 @@ export class GortexClient implements NativePort {
         await connection.ready;
         return await sampleDaemonHealth(connection.client);
       } catch (error) {
+        if (isSessionReset(error)) throw new NativeError("session_reset", sessionResetMessage);
         if (isMcpTimeout(error)) throw new NativeError("timeout", "Gortex didn't send a health snapshot in time.");
         throw error;
       } finally {

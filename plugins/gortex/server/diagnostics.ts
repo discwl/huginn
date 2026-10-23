@@ -6,8 +6,9 @@ import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../s
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
 import { busyMessage, isBusyMessage, isWarmingUpMessage, warmupWindowSeconds } from "../shared/native-retry.ts";
-import { parseDaemonStatus, summarizeSessions, uptimeSeconds, type DaemonSession } from "./daemon-status.ts";
+import { parseDaemonStatus, summarizeSessions, uptimeSeconds, type DaemonSession, type DaemonStatus } from "./daemon-status.ts";
 import { requestTimeouts, type DiagnosticsEvidence, type WorktreeChange } from "./diagnostics-evidence.ts";
+import { fullIndexes, lastCrash, readySeconds, stepLabel, triggerLabel, warmupTimeline } from "./warmup.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { runProcess } from "./process-runner.ts";
 
@@ -43,6 +44,24 @@ const TIMEOUT_WINDOW_MS = 15 * 60_000, WORKTREE_WINDOW_MS = 2 * 60 * 60_000;
 // Gortex's own CLI calls and this plugin's connections are not agent chats.
 const NOT_AGENTS = new Set(["", "cli", "paseo-gortex"]);
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+const REINDEX_WINDOW_MS = 60 * 60_000, CRASH_WINDOW_MS = 24 * 60 * 60_000;
+// A startup longer than this delays every agent's first Gortex requests noticeably.
+const SLOW_STARTUP_SECONDS = 300;
+/** "45 s", "3 min", "2 h", "2 h 5 min". */
+function duration(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes} min`;
+  return minutes % 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes / 60} h`;
+}
+/** Whether "gortex v0.64.9+abc" is at least 0.64.9. */
+function atLeast(version: string, minimum: [number, number, number]): boolean {
+  const match = /v?(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!match) return false;
+  const parts = match.slice(1, 4).map(Number);
+  for (let i = 0; i < 3; i++) if (parts[i] !== minimum[i]) return parts[i] > minimum[i];
+  return true;
+}
 /** Host-local "2026-10-20 10:21", the same clock the host's Gortex logs use. */
 function stamp(ms: number): string {
   const date = new Date(ms), pad = (value: number) => String(value).padStart(2, "0");
@@ -132,9 +151,11 @@ export class GortexDiagnostics {
     let sessions: DaemonSession[] = [];
     let uptime: number | null = null;
     let socket: string | null = null;
+    let daemonStatus: DaemonStatus | null = null;
     try {
       status = await this.cli.run(["daemon", "status"], 30_000);
       const parsed = parseDaemonStatus(status);
+      daemonStatus = parsed;
       daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions; uptime = uptimeSeconds(parsed.uptime); socket = parsed.socket;
       const warming = parsed.warming;
       const state = daemonReady ? "pass" : daemonRunning ? "warn" : "fail";
@@ -226,9 +247,11 @@ export class GortexDiagnostics {
       if (refused === batch.length) break;
     }
     const unprobed = probes.length - probed;
-    // Stuck means: ready for minutes, Git is fast, and every repository asked still refuses after quick retries.
-    // A slow Git explains the same refusals without anything being wedged, and a restart would not help.
-    const stuck = !gitSlow && daemonReady && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probed > 0 && discoveryFailures === probed;
+    // Stuck means: ready for minutes, Git is fast, nothing is still loading after a start, and every repository asked
+    // still refuses after quick retries. A slow Git, or a startup still loading repositories (Gortex 0.64.9 reports
+    // that), explains the same refusals without anything being wedged, and a restart would not help.
+    const loading = daemonStatus?.repos.filter(repo => repo.state === "loading") ?? [];
+    const stuck = !gitSlow && daemonReady && !loading.length && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probed > 0 && discoveryFailures === probed;
     if (stuck) warming = false;
     const notAsked = unprobed ? ` The other ${plural(unprobed, "repository", "repositories")} weren't asked, since asking only adds to Gortex's work while it refuses everything.` : "";
     checks.push({
@@ -265,7 +288,7 @@ export class GortexDiagnostics {
       });
       for (const item of stale) add({ id: `${PRUNE}${item.path}`, title: `Prune stale worktrees in ${item.repo}`, detail: "Runs git worktree prune, which removes Git's records of worktrees whose folders are already gone. No files or branches are deleted.", risk: "safe", target: item.path });
     }
-    if (this.evidence) await this.evidenceChecks(this.evidence, checks, { socket, sessions, probes: probes.map(row => row.path), trouble: stuck || discoveryFailures > 0 });
+    if (this.evidence) await this.evidenceChecks(this.evidence, checks, { socket, sessions, probes: probes.map(row => row.path), trouble: stuck || discoveryFailures > 0, status: daemonStatus, version, uptime });
     if (warming) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again. Gortex refuses requests while it discovers checkouts, which normally clears within minutes of a daemon start or a new worktree.", risk: "safe", target: null });
     if (failures.length && !busy && !warming && !stuck) {
       add({ id: "daemon-reload", title: "Reload Gortex configuration", detail: "Runs gortex daemon reload, which re-reads config.yaml and picks up added or removed repositories without a restart.", risk: "safe", target: null });
@@ -275,9 +298,10 @@ export class GortexDiagnostics {
   }
 
   /** Checks read without asking Gortex: timeouts in its log, recent worktree changes, and chats older than its last update. */
-  private async evidenceChecks(evidence: DiagnosticsEvidence, checks: DiagnosticCheck[], context: { socket: string | null; sessions: DaemonSession[]; probes: string[]; trouble: boolean }): Promise<void> {
+  private async evidenceChecks(evidence: DiagnosticsEvidence, checks: DiagnosticCheck[], context: { socket: string | null; sessions: DaemonSession[]; probes: string[]; trouble: boolean; status: DaemonStatus | null; version: string; uptime: number | null }): Promise<void> {
     const now = this.now();
     const log = await evidence.daemonLog(context.socket).catch(() => null);
+    this.startupCheck(checks, context.status, context.uptime, log, now);
     let timedOut = 0;
     if (log === null) checks.push({ id: "timeouts", title: "Requests that ran out of time", state: "skipped", detail: "Gortex's daemon log can't be read on this host, so request timeouts weren't checked.", evidence: null });
     else {
@@ -311,6 +335,8 @@ export class GortexDiagnostics {
         evidence: trim(changes.slice(0, 8).map(change => `${change.change} ${stamp(change.at).slice(11)} ${change.path}${change.source === "paseo" ? " (Paseo)" : ""}`).join(" · "), 400),
       });
     }
+    await this.crashCheck(evidence, checks, context.socket, log, now);
+    this.reindexCheck(checks, context.version, log, now);
     // A chat's Gortex tools come from the Gortex that was installed when it connected.
     const changedAt = await evidence.executableChangedAt().catch(() => null);
     const agents = context.sessions.filter(session => !NOT_AGENTS.has(session.client));
@@ -324,6 +350,99 @@ export class GortexDiagnostics {
         evidence: older.length ? trim(older.map(session => `${session.client}, connected ${session.connected}, ${session.cwd}`).join(" · "), 400) : null,
       });
     }
+  }
+
+  /**
+   * How the daemon's startup went: still loading (Gortex 0.64.9 marks repositories "loading" until warmup ends), or how
+   * long the last one took and its slowest steps, from `daemon status` and the startup steps in the log.
+   */
+  private startupCheck(checks: DiagnosticCheck[], status: DaemonStatus | null, uptime: number | null, log: string | null, now: number): void {
+    if (!status?.running) return;
+    const timeline = log ? warmupTimeline(log) : null;
+    const loading = status.repos.filter(repo => repo.state === "loading");
+    const steps = timeline?.steps.map(step => `${stepLabel(step.step)} ${step.seconds === null ? "running" : `${step.seconds.toFixed(1)} s`}`).join(" · ") ?? null;
+    if (!status.ready || loading.length) {
+      const names = loading.slice(0, 5).map(repo => repo.name).join(", ") + (loading.length > 5 ? ` and ${loading.length - 5} more` : "");
+      const running = timeline?.running;
+      checks.push({
+        id: "startup", title: "Startup", state: "warn",
+        detail: `Gortex started ${uptime === null ? "recently" : `${duration(uptime)} ago`} and is still ${loading.length ? `loading ${loading.length} of ${status.repos.length} repositories (${names})` : "warming up"}.${running ? ` Current step: ${stepLabel(running.step)}, running for ${duration(Math.max(0, (now - running.startedAt) / 1000))}.` : ""} Requests for repositories still loading are refused until then; this usually takes seconds to a few minutes.`,
+        evidence: steps ? trim(steps, 400) : null,
+      });
+      return;
+    }
+    // "ready — queryable (warmup 4s); enriching 2/5 repos": answering queries, but the startup isn't finished.
+    const enriching = timeline?.readySeconds == null && /^ready\b.*\bqueryable\b/.test(status.state ?? "") ? /;\s*(.+)$/.exec(status.state ?? "")?.[1]?.trim() ?? null : null;
+    if (enriching) {
+      const answered = timeline?.queryableSeconds ?? readySeconds(status.state);
+      checks.push({
+        id: "startup", title: "Startup", state: "pass",
+        detail: `Gortex has answered queries since ${answered === null ? "shortly" : `${duration(answered)}`} after starting, and is still finishing its startup (${enriching}).`,
+        evidence: steps ? trim(steps, 400) : null,
+      });
+      return;
+    }
+    const seconds = timeline?.readySeconds ?? readySeconds(status.state);
+    const queryable = timeline?.queryableSeconds ?? null;
+    const longest = (timeline?.steps ?? []).filter(step => (step.seconds ?? 0) >= 1).sort((a, b) => (b.seconds ?? 0) - (a.seconds ?? 0)).slice(0, 3);
+    const repo = timeline?.slowestRepo && timeline.slowestRepo.seconds >= 1 ? timeline.slowestRepo : null;
+    if (seconds === null && !longest.length) return;
+    const slow = seconds !== null && seconds > SLOW_STARTUP_SECONDS;
+    const detail = [
+      seconds === null ? null : `The last startup took ${duration(seconds)}${queryable !== null && seconds - queryable >= 1 ? `, and Gortex answered queries after ${duration(queryable)}` : ""}.`,
+      longest.length ? `The longest parts were ${longest.map(step => `${stepLabel(step.step)} (${duration(step.seconds!)})`).join(", ")}${repo ? `; ${repo.path.split(/[\\/]/).filter(Boolean).pop()} took longest to load (${duration(repo.seconds)})` : ""}.` : null,
+      slow ? "A startup this long delays every agent's first Gortex requests; other programs using the CPU or scanning each file usually explain it." : null,
+    ].filter(Boolean).join(" ");
+    checks.push({ id: "startup", title: "Startup", state: slow ? "warn" : "pass", detail, evidence: steps ? trim(steps, 400) : null });
+  }
+
+  /** A crash in the last day, from Gortex 0.64.9's crash log or stack dumps that older versions wrote into the daemon log. */
+  private async crashCheck(evidence: DiagnosticsEvidence, checks: DiagnosticCheck[], socket: string | null, log: string | null, now: number): Promise<void> {
+    const stderr = await evidence.crashLog(socket).catch(() => null);
+    if (log === null && stderr === null) {
+      checks.push({ id: "crashes", title: "Crashes", state: "skipped", detail: "Gortex's logs can't be read on this host, so crashes weren't checked.", evidence: null });
+      return;
+    }
+    const found = [stderr ? lastCrash(stderr.text, stderr.writtenAt) : null, log ? lastCrash(log, null) : null]
+      .filter((crash): crash is NonNullable<typeof crash> => crash !== null && crash.at !== null && now - crash.at <= CRASH_WINDOW_MS)
+      .sort((a, b) => b.at! - a.at!);
+    const crash = found[0];
+    if (!crash) { checks.push({ id: "crashes", title: "Crashes", state: "pass", detail: "No crash in the last day.", evidence: null }); return; }
+    const back = crash.restartedAt !== null ? ` Gortex was logging again ${duration(Math.max(0, (crash.restartedAt - crash.at!) / 1000))} later.` : "";
+    checks.push({
+      id: "crashes", title: "Crashes", state: "warn",
+      detail: `Gortex crashed or wrote a stack dump ${duration((now - crash.at!) / 1000)} ago (${crash.summary}).${back} Agents lose Gortex until it's running again. If this repeats, the dump in its log is what to report to Gortex.`,
+      evidence: `${stamp(crash.at!)}: ${crash.summary}`,
+    });
+  }
+
+  /** Full rebuilds of a repository's index in the last hour and what triggered them (logged from Gortex 0.64.9 on). */
+  private reindexCheck(checks: DiagnosticCheck[], version: string, log: string | null, now: number): void {
+    if (log === null) return;
+    if (!atLeast(version, [0, 64, 9])) {
+      checks.push({ id: "reindexes", title: "Full reindexes", state: "skipped", detail: "Gortex logs why it rebuilds a repository's whole index from 0.64.9 on.", evidence: null });
+      return;
+    }
+    const all = fullIndexes(log, now - REINDEX_WINDOW_MS);
+    const atStartup = all.filter(entry => entry.origin === "daemon_warmup").length;
+    const others = all.filter(entry => entry.origin !== "daemon_warmup");
+    const byRepo = new Map<string, Map<string, number>>();
+    for (const entry of others) {
+      const triggers = byRepo.get(entry.repo) ?? new Map<string, number>();
+      triggers.set(entry.origin, (triggers.get(entry.origin) ?? 0) + 1);
+      byRepo.set(entry.repo, triggers);
+    }
+    const times = (count: number) => count === 1 ? "once" : count === 2 ? "twice" : `${count} times`;
+    const repeated = [...byRepo.values()].some(triggers => [...triggers.values()].reduce((sum, count) => sum + count, 0) >= 2);
+    const busy = others.length >= 3 || repeated;
+    const startupNote = atStartup ? ` (plus ${plural(atStartup, "rebuild")} at startup)` : "";
+    const detail = !all.length ? "No repository's whole index was rebuilt in the last hour."
+      : !others.length ? `${plural(atStartup, "repository index was", "repository indexes were")} rebuilt at startup in the last hour, and none since.`
+      : `Gortex rebuilt a repository's whole index ${times(others.length)} in the last hour${startupNote}: ${[...byRepo].map(([repo, triggers]) => `${repo} ${[...triggers].map(([origin, count]) => `${times(count)} ${triggerLabel(origin)}`).join(" and ")}`).join("; ")}.${busy ? " Each rebuild uses CPU for a while, and requests can wait or be refused meanwhile." : ""}`;
+    checks.push({
+      id: "reindexes", title: "Full reindexes", state: busy ? "warn" : "pass", detail,
+      evidence: others.length ? trim(others.slice(-8).map(entry => `${stamp(entry.at).slice(11)} ${entry.repo} (${entry.origin})`).join(" · "), 400) : null,
+    });
   }
 
   private finish(started: number, checks: DiagnosticCheck[], remedies: Remedy[]): DiagnosticsReport {

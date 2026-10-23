@@ -29,7 +29,7 @@ const label = (value: string) => value || "Not set";
 
 function RepositoryRow({ theme, repository, compact, onOpen, onSettings, onUntrack }: { theme: Props["theme"]; repository: Repository; compact: boolean; onOpen: () => void; onSettings: () => void; onUntrack: () => void }) {
   const [focused, setFocused] = useState<"row" | "settings" | "untrack" | null>(null);
-  const available = repository.state === "resolved";
+  const available = repository.state === "resolved", loading = repository.state === "loading";
   return <View style={{ flexDirection: "row", alignItems: "center", borderTopWidth: 1, borderColor: theme.colors.border, minWidth: 0 }}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${available ? "Explore" : "View settings for"} ${repository.name}, ${repository.path}, workspace ${label(repository.declaredWorkspace)}`} onPress={available ? onOpen : onSettings} onFocus={() => setFocused("row")} onBlur={() => setFocused(null)} style={({ pressed }) => ({ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12, minHeight: compact ? 94 : 76, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: focused === "row" ? theme.colors.accent : "transparent", backgroundColor: pressed || focused === "row" ? theme.colors.surface2 : theme.colors.surface1 })}>
       {!compact && <View style={{ padding: 9, borderRadius: 10, backgroundColor: theme.colors.surface0 }}><Icon name="FolderGit2" size={18} color={theme.colors.accent} /></View>}
@@ -37,12 +37,12 @@ function RepositoryRow({ theme, repository, compact, onOpen, onSettings, onUntra
         <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: 14, lineHeight: 20, fontWeight: "600" }}>{repository.name}</Text>
         <Text numberOfLines={1} ellipsizeMode="middle" style={{ color: theme.colors.foregroundMuted, fontFamily: "monospace", fontSize: 11, lineHeight: 17 }}>{repository.path}</Text>
         {compact && <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 17 }}>{label(repository.declaredWorkspace)} · {label(repository.declaredProject)}</Text>}
-        {compact && !available && <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>Code unavailable · Open settings</Text>}
+        {compact && !available && <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>{loading ? "Loading · Gortex is starting" : "Code unavailable · Open settings"}</Text>}
       </View>
       {!compact && <>
         <Text numberOfLines={2} style={{ width: 150, color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>{label(repository.declaredWorkspace)}</Text>
         <Text numberOfLines={2} style={{ width: 130, color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>{label(repository.declaredProject)}</Text>
-        <View style={{ width: 115 }}><Badge theme={theme} label={available ? "Available" : "Unavailable"} tone={available ? "success" : "warning"} icon={available ? "CheckCircle2" : "CircleAlert"} /></View>
+        <View style={{ width: 115 }}><Badge theme={theme} label={available ? "Available" : loading ? "Loading" : "Unavailable"} tone={available ? "success" : "warning"} icon={available ? "CheckCircle2" : loading ? "Clock" : "CircleAlert"} /></View>
       </>}
       <Icon name="ChevronRight" size={16} color={theme.colors.foregroundMuted} />
     </Pressable>
