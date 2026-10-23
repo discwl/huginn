@@ -138,6 +138,9 @@ test("Windows archive verification fails closed on missing, duplicate or mismatc
       const fetcher: typeof fetch = async input => new Response(String(input).endsWith("checksums.txt") ? checksum : archive);
       await assert.rejects(verifiedWindowsArchive(root, "v0.64.4", fetcher), /checksum/i);
     }
+    // Right after a release, before its Windows build is published.
+    const early: typeof fetch = async input => new Response(String(input).endsWith("checksums.txt") ? `${hash}  gortex_linux_amd64.tar.gz\n` : archive);
+    await assert.rejects(verifiedWindowsArchive(root, "v0.64.4", early), /v0\.64\.4 has no Windows download yet/);
     const fetcher: typeof fetch = async input => new Response(String(input).endsWith("checksums.txt") ? `${hash}  gortex_windows_amd64.zip\n` : archive);
     const path = await verifiedWindowsArchive(root, "v0.64.4", fetcher);
     assert.deepEqual(await readFile(path), archive);
