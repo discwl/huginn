@@ -37,10 +37,39 @@ export function compareVersions(left: string, right: string): number {
 export type UpdateRelease = { version: string; url: string };
 export type UpdateReceipt = { installedVersion: string; backupPath: string | null; daemonReachable: boolean | null; warning: string | null };
 export type UpdateStage = Exclude<UpdateJob["stage"], "done">;
+/** activate runs `before` once this plugin's own Gortex connections are closed; a refusal there leaves the host as it was. */
+export type Activate = (effect: () => Promise<UpdateReceipt>, before?: () => Promise<void>) => Promise<UpdateReceipt>;
 export interface UpdatePort {
   inspect(): Promise<UpdateInstallation>;
   latest(): Promise<UpdateRelease>;
-  install(installation: UpdateInstallation, release: UpdateRelease, stage: (value: UpdateStage) => void, activate: (effect: () => Promise<UpdateReceipt>) => Promise<UpdateReceipt>): Promise<UpdateReceipt>;
+  install(installation: UpdateInstallation, release: UpdateRelease, stage: (value: UpdateStage) => void, activate: Activate): Promise<UpdateReceipt>;
+}
+export type GortexProcess = { path: string; commandLine: string };
+
+/** The folder Scoop keeps Gortex's versions in ("…\scoop\apps\gortex\"), when Scoop installed it; else null. */
+export function scoopAppFolder(binary: string): string | null {
+  const root = /^(.*[\\/]scoop)[\\/](?:shims|apps)[\\/]/i.exec(binary)?.[1];
+  return root ? `${root.replace(/\//g, "\\").toLowerCase()}\\apps\\gortex\\` : null;
+}
+
+/**
+ * Gortex processes that make Scoop skip an update: Scoop leaves an app alone while anything runs from its folder, and
+ * Gortex's upgrade then restarts the daemon on the same version. The daemon doesn't count, since the upgrade stops it
+ * first; each agent chat using Gortex keeps a process of its own.
+ */
+export function scoopBlockers(binary: string, processes: GortexProcess[]): number {
+  const folder = scoopAppFolder(binary);
+  if (!folder) return 0;
+  return processes.filter(process => process.path.replace(/\//g, "\\").toLowerCase().startsWith(folder) && !/\sdaemon\s/i.test(` ${process.commandLine} `)).length;
+}
+
+const processListScript = `Get-CimInstance Win32_Process -Filter "Name = 'gortex.exe'" | ForEach-Object { @($_.ExecutablePath, $_.CommandLine) -join [char]9 }`;
+
+/** Every running gortex.exe, with its path and command line. */
+async function gortexProcesses(): Promise<GortexProcess[]> {
+  const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const output = await runProcess(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(processListScript, "utf16le").toString("base64")], homedir(), { timeoutMs: 30_000, maxBytes: 256 * 1024 });
+  return output.split(/\r?\n/).filter(line => line.includes("\t")).map(line => { const [path = "", commandLine = ""] = line.split("\t"); return { path, commandLine }; });
 }
 
 function requestDeadline(milliseconds: number) {
@@ -143,7 +172,8 @@ try {
 export class HostGortexUpdater implements UpdatePort {
   private binary: string;
   private fetcher: typeof fetch;
-  constructor(binary = "gortex", fetcher: typeof fetch = fetch) { this.binary = binary; this.fetcher = fetcher; }
+  private processes: () => Promise<GortexProcess[]>;
+  constructor(binary = "gortex", fetcher: typeof fetch = fetch, processes: () => Promise<GortexProcess[]> = gortexProcesses) { this.binary = binary; this.fetcher = fetcher; this.processes = processes; }
   async inspect(): Promise<UpdateInstallation> {
     const binary = await realpath(await resolveHostExecutable(this.binary));
     const version = parseInstalledVersion(await runProcess(binary, ["version"], homedir(), { maxBytes: 4096 }));
@@ -164,7 +194,19 @@ export class HostGortexUpdater implements UpdatePort {
     try { await runProcess(binary, ["daemon", "status"], homedir(), { timeoutMs: 15000, maxBytes: 512 * 1024 }); return true; }
     catch { return false; }
   }
-  async install(installation: UpdateInstallation, release: UpdateRelease, stage: (value: UpdateStage) => void, activate: (effect: () => Promise<UpdateReceipt>) => Promise<UpdateReceipt>): Promise<UpdateReceipt> {
+  /** Refuses before anything changes when Scoop would skip the update (see scoopBlockers). */
+  private async assertScoopCanUpdate(binary: string): Promise<void> {
+    if (!scoopAppFolder(binary)) return;
+    let blockers = 0;
+    // This plugin's own connections were just closed, and take a moment to exit.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 1000));
+      blockers = scoopBlockers(binary, await this.processes());
+      if (!blockers) return;
+    }
+    throw new Error(`Gortex was installed with Scoop, which won't update it while it runs, and ${blockers} Gortex ${blockers === 1 ? "process is" : "processes are"} running besides the daemon (each agent chat using Gortex keeps one). Nothing was changed, and the daemon wasn't restarted. Update when no agent is using Gortex.`);
+  }
+  async install(installation: UpdateInstallation, release: UpdateRelease, stage: (value: UpdateStage) => void, activate: Activate): Promise<UpdateReceipt> {
     if (!stableTag.test(release.version) || installation.method === "unsupported") throw new Error("This update is unsupported.");
     if (installation.method === "native") return activate(async () => {
       stage("installing");
@@ -177,7 +219,7 @@ export class HostGortexUpdater implements UpdatePort {
       const installedVersion = installed.version;
       const daemonReachable = await this.daemonReachable(installed.binary);
       return { installedVersion, backupPath: null, daemonReachable, warning: daemonReachable ? null : "The installed binary was checked, but the daemon is unavailable. Verify its state on this host." };
-    });
+    }, () => this.assertScoopCanUpdate(installation.binary));
     if (process.platform !== "win32") throw new Error("The Windows release adapter is unavailable on this host.");
     const temporaryRoot = await realpath(tmpdir());
     const temporary = await mkdtemp(join(temporaryRoot, "paseo-gortex-update-"));
@@ -255,6 +297,7 @@ export class GortexUpdates {
     const warnings = ["Updates Gortex for every client using this host. A running daemon may restart, briefly interrupting code queries and applying its saved configuration.", "Repository tracking and agent configuration are not edited by this update. No index rebuild or enrichment is requested."];
     if (status.installation.method === "windows-release") warnings.push("Downloads the official Windows release, requires a matching SHA-256 checksum, and retains the previous executable beside the installed binary.");
     else warnings.push("Uses Gortex's detected native updater. Package managers control their available version and may install a newer release than the one shown. Agent configuration migration is disabled.");
+    if (scoopAppFolder(status.installation.binary)) warnings.push("Scoop won't update Gortex while it runs, and each agent chat using Gortex keeps it running. While any does, the update is refused before anything changes.");
     warnings.push("The plugin validates native responses and operation support. A breaking Gortex API change may require a plugin update; newer stable version numbers alone do not disable repository controls.");
     warnings.push("Agent chats that are already open keep the previous Gortex tools until they're restarted. Diagnostics lists them after the update.");
     const preview = { id: randomUUID(), expiresAt: new Date(this.now() + 300_000).toISOString(), installation: status.installation, targetVersion: status.latestVersion, releaseUrl: status.releaseUrl, warnings };
@@ -281,9 +324,9 @@ export class GortexUpdates {
     let attempted = false;
     try {
       await this.verifyInstallation(preview);
-      const receipt = await this.port.install(preview.installation, { version: preview.targetVersion, url: preview.releaseUrl }, stage => { job.stage = stage; }, async effect => {
+      const receipt = await this.port.install(preview.installation, { version: preview.targetVersion, url: preview.releaseUrl }, stage => { job.stage = stage; }, async (effect, before) => {
         await this.verifyInstallation(preview);
-        return this.pause(async () => { await this.verifyInstallation(preview); attempted = true; return effect(); });
+        return this.pause(async () => { await this.verifyInstallation(preview); await before?.(); attempted = true; return effect(); });
       });
       job.installedVersion = receipt.installedVersion; job.backupPath = receipt.backupPath; job.daemonReachable = receipt.daemonReachable;
       const matches = compareVersions(receipt.installedVersion, preview.targetVersion) >= 0;

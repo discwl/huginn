@@ -97,6 +97,12 @@ requires Windows PowerShell, but no interactive desktop or PowerShell 7 folder p
 Other verified installation methods use the native `gortex upgrade --run --no-migrate`
 command; unknown methods show an unsupported state. Package managers can install a
 newer release than the preview if that is the version they currently distribute.
+Scoop won't update an app while it runs, and every agent chat using Gortex keeps a
+Gortex process running. On a Scoop installation the update is refused, before the
+daemon is stopped, while any Gortex process other than the daemon runs. Otherwise
+Gortex would restart its daemon and Scoop would skip the update.
+A release's Windows download is published after its other platforms (about 20
+minutes later for v0.64.10); until then the update says so and installs nothing.
 
 Updates affect every Gortex client on that host and can briefly interrupt queries.
 They do not request tracking changes, index rebuilds, enrichment, or agent configuration
