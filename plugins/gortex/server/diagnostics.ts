@@ -11,6 +11,7 @@ import { requestTimeouts, type DiagnosticsEvidence, type WorktreeChange } from "
 import { fullIndexes, lastCrash, readySeconds, stepLabel, triggerLabel, warmupTimeline } from "./warmup.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { runProcess } from "./process-runner.ts";
+import { repositoryPathKey } from "./project-catalog.ts";
 
 export interface DiagnosticsNative {
   version(): Promise<string>;
@@ -277,8 +278,13 @@ export class GortexDiagnostics {
     }
     const gitSlow = gitMs !== null && gitMs > SLOW_GIT_MS;
 
+    // While the daemon warms up, and for a repository it still reports loading (Gortex 0.64.9 on), a failure is part of
+    // the startup: Gortex answers "repository not tracked" until it has loaded a repository.
+    const loading = daemonStatus?.repos.filter(repo => repo.state === "loading") ?? [];
+    const loadingPaths = new Set(loading.map(repo => repositoryPathKey(repo.path)));
+    const starting = daemonRunning && !daemonReady;
     const failures: string[] = [], retried: string[] = [];
-    let busy = false, warming = false, discoveryFailures = 0, probed = 0;
+    let busy = false, warming = false, discoveryFailures = 0, startupFailures = 0, probed = 0;
     for (let start = 0; start < probes.length; start += PROBE_BATCH) {
       const batch = probes.slice(start, start + PROBE_BATCH);
       const results = await Promise.all(batch.map(row => this.probe(row)));
@@ -289,15 +295,15 @@ export class GortexDiagnostics {
         const { row, text } = result;
         if (isBusyMessage(text)) { busy = true; failures.push(`${row.repo}: refused, dispatcher busy`); }
         else if (isWarmingUpMessage(text)) { warming = true; discoveryFailures++; refused++; failures.push(`${row.repo}: checkout discovery pending`); }
+        else if (starting || loadingPaths.has(repositoryPathKey(row.path))) { warming = true; startupFailures++; refused++; failures.push(`${row.repo}: ${trim(text, 120)}`); }
         else failures.push(`${row.repo}: ${trim(text, 120)}`);
       }
       if (refused === batch.length) break;
     }
     const unprobed = probes.length - probed;
     // Stuck means: ready for minutes, Git is fast, nothing is still loading after a start, and every repository asked
-    // still refuses after quick retries. A slow Git, or a startup still loading repositories (Gortex 0.64.9 reports
-    // that), explains the same refusals without anything being wedged, and a restart would not help.
-    const loading = daemonStatus?.repos.filter(repo => repo.state === "loading") ?? [];
+    // still refuses after quick retries. A slow Git, or a startup still loading repositories, explains the same
+    // refusals without anything being wedged, and a restart would not help.
     const stuck = !gitSlow && daemonReady && !loading.length && uptime !== null && uptime >= STUCK_AFTER_SECONDS && probed > 0 && discoveryFailures === probed;
     if (stuck) warming = false;
     const notAsked = unprobed ? ` The other ${plural(unprobed, "repository", "repositories")} weren't asked, since asking only adds to Gortex's work while it refuses everything.` : "";
@@ -308,6 +314,7 @@ export class GortexDiagnostics {
         ? retried.length ? `All ${probes.length} answer, but ${retried.length} only on a retry. Agents can see "checkout discovery is pending" on a first request; repeating the request right away works.`
           : `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.`
         : stuck ? `Gortex reports ready${gitMs === null ? "" : " and Git is fast"}, but checkout discovery fails for ${unprobed ? `the first ${probed}` : `all ${probed}`} ${probed === 1 ? "repository" : "repositories"} even on quick retries. It looks stuck rather than busy.${notAsked}`
+        : startupFailures ? `${failures.length} of ${probed} didn't answer, because Gortex is still starting: it refuses requests for a repository until it has loaded it. See Startup for its progress.${notAsked}`
         : `${failures.length} of ${probed} did not answer, even on quick retries.${notAsked}`,
       evidence: failures.length ? trim(failures.join(" · "), 400) : retried.length ? `needed a retry: ${retried.join(", ")}` : null,
     });

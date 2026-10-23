@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { GortexDiagnostics, type DiagnosticsCli, type DiagnosticsNative } from "./diagnostics.ts";
 import type { DiagnosticsEvidence } from "./diagnostics-evidence.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
@@ -56,6 +57,25 @@ test("a startup still loading repositories is described, with its current step, 
   // Eight minutes in and every repository refused, but it's still loading: a wait, not a restart.
   assert.notEqual(check(report, "repositories")!.state, "fail");
   assert.ok(!report.remedies.some(remedy => remedy.id === "daemon-restart"));
+});
+
+test("repositories Gortex hasn't loaded yet answer \"not tracked\" during a startup: a wait, not a problem", async () => {
+  const notTracked = () => { throw new Error("MCP error -32000: repository not tracked: C:\\Repos\\app"); };
+  const warming = " pid 1\n socket    C:/Users/test/.gortex/cache/daemon.sock\n uptime    39s\n state     warming up (socket reachable, resolving references)\n sessions  4\n" + repoTable(["loading", "loading"]);
+  const report = await diagnostics({ status: warming, info: notTracked }).run();
+  const access = check(report, "repositories")!;
+  assert.equal(access.state, "warn");
+  assert.match(access.detail, /didn't answer, because Gortex is still starting/);
+  assert.match(access.evidence!, /repository not tracked/);
+  assert.equal(report.state, "degraded");
+  assert.deepEqual(report.remedies.map(remedy => remedy.id), ["recheck"]);
+  // Ready, but still loading one of them: only that one's failure is the startup's.
+  const loadingOne = await diagnostics({ status: READY + repoTable(["loading", "ok"]), info: notTracked }).run();
+  assert.equal(check(loadingOne, "repositories")!.state, "warn");
+  // Ready and loaded, the same answer is a real problem.
+  const loaded = await diagnostics({ info: notTracked }).run();
+  assert.equal(check(loaded, "repositories")!.state, "fail");
+  assert.ok(loaded.remedies.some(remedy => remedy.id === "daemon-reload"));
 });
 
 test("after startup, how long it took and its slowest steps; answering queries late is a warning", async () => {
@@ -129,18 +149,20 @@ test("full reindexes in the last hour are named with their trigger; repeats are 
 
 test("while Gortex starts, the library shows loading and refused repositories as Loading, asking each at most once", async () => {
   const asked: { path: string; single?: boolean }[] = [];
-  const refused = tmpdir();
+  const refused = tmpdir(), untracked = join(process.cwd(), "server");
   const native: NativePort = {
     assignments: async () => [
       { repo: "loading", path: "C:/Repos/loading", workspace: "w", project: "p", source: "global" },
       { repo: "here", path: process.cwd(), workspace: "w", project: "p", source: "global" },
       { repo: "refused", path: refused, workspace: "w", project: "p", source: "global" },
+      { repo: "untracked", path: untracked, workspace: "w", project: "p", source: "global" },
     ],
     startup: async () => ({ starting: true, loading: ["C:/Repos/loading"] }),
     version: async () => "gortex v0.64.9+fixture", close: async () => {},
     info: async (path, options) => {
       asked.push({ path, single: options?.single });
       if (path === await realpath(refused)) throw new Error(refusal);
+      if (path === await realpath(untracked)) throw new Error(`MCP error -32000: repository not tracked: ${path}`);
       return { workspace: "w", project: "p", mode: "workspace", members: [{ name: "here", path: process.cwd() }] };
     },
     query: async () => { throw new Error("No graph query expected"); },
@@ -153,7 +175,8 @@ test("while Gortex starts, the library shows loading and refused repositories as
     assert.match(state("loading").error!, /still loading this repository after starting/);
     assert.equal(state("here").state, "resolved");
     assert.equal(state("refused").state, "loading", "refused while starting reads as loading, not unavailable");
-    assert.equal(asked.length, 2, "the loading repository wasn't asked about");
+    assert.equal(state("untracked").state, "loading", "not tracked yet while starting reads as loading too");
+    assert.equal(asked.length, 3, "the loading repository wasn't asked about");
     assert.ok(asked.every(entry => entry.single === true), "one try each while starting");
   } finally { library.close(); }
 });
@@ -172,4 +195,16 @@ test("Host health adds the startup line only while Gortex isn't ready", async ()
   assert.equal((await readHostHealth(health(false), { warmup })).warmup, "Starting: 1 of 2 repositories loaded");
   assert.equal((await readHostHealth(health(true), { warmup })).warmup, null);
   assert.equal(reads, 1, "a ready host doesn't read daemon status for it");
+});
+
+test("Host health while Gortex starts and no repository is loaded yet reads as starting, not unavailable", async () => {
+  const notTracked = { assignments: async () => [{ path: "C:/a" }, { path: "C:/b" }], daemonHealth: async (path: string): Promise<never> => { throw new Error(`MCP error -32000: repository not tracked: ${path}`); } };
+  const starting = await readHostHealth(notTracked, { warmup: async () => "Starting: 0 of 2 repositories loaded" });
+  assert.equal(starting.state, "busy");
+  assert.match(starting.error!, /still starting/);
+  assert.equal(starting.warmup, "Starting: 0 of 2 repositories loaded");
+  // Once Gortex is ready, the same answer is reported as it is.
+  const ready = await readHostHealth(notTracked, { warmup: async () => null });
+  assert.equal(ready.state, "unavailable");
+  assert.match(ready.error!, /repository not tracked: C:\/a/);
 });

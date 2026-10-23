@@ -1,5 +1,5 @@
 import type { DaemonHealth } from "../shared/health-models.ts";
-import { busyMessage, isBusyMessage, isWarmingUpMessage, pausedMessage, warmingUpMessage } from "../shared/native-retry.ts";
+import { busyMessage, isBusyMessage, isWarmingUpMessage, pausedMessage, startingMessage, warmingUpMessage } from "../shared/native-retry.ts";
 import { isWaiting } from "./native-response.ts";
 
 type HealthPort = {
@@ -50,7 +50,12 @@ export async function readHostHealth(native: HealthPort, options: { retryNow?: b
       }
     }
     if (stalled === null && paused !== null) return { ...base, state: "paused" as const, health: null, error: pausedMessage(paused - now()), pausedUntil: new Date(paused).toISOString(), warmup: await warmup() };
-    if (stalled === null) throw failed;
+    if (stalled === null) {
+      // While Gortex starts, every repository can fail ("repository not tracked" until it has loaded them).
+      const starting = await warmup();
+      if (starting === null) throw failed;
+      return { ...base, state: "busy" as const, health: null, error: startingMessage, pausedUntil: null, warmup: starting };
+    }
     return { ...base, state: "busy" as const, health: null, error: healthError(stalled), pausedUntil: paused === null ? null : new Date(paused).toISOString(), warmup: await warmup() };
   } catch (error) {
     return { ...base, state: "unavailable" as const, health: null, error: healthError(error), pausedUntil: null, warmup: null };
