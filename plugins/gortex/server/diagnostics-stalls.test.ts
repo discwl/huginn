@@ -132,6 +132,12 @@ test("Git's worktree records name the worktrees added since a time, and the log 
     const changes = await evidence.worktreeChanges([repo], Date.now() - 60_000);
     assert.deepEqual(changes.map(change => [change.change, change.path, change.source]), [["added", join(root, "feature"), "git"]]);
     assert.deepEqual(await evidence.worktreeChanges([repo], Date.now() + 60_000), []);
+    // From a linked worktree, whose .git file names its record there; the record's commondir leads to the shared folder.
+    const linked = join(root, "feature");
+    await mkdir(linked);
+    await writeFile(join(linked, ".git"), `gitdir: ${record}\n`);
+    await writeFile(join(record, "commondir"), "../..\n");
+    assert.deepEqual((await evidence.worktreeChanges([linked], Date.now() - 60_000)).map(change => change.path), [linked]);
     await writeFile(join(root, "daemon.log"), "first\nsecond\n");
     assert.equal(await evidence.daemonLog(join(root, "daemon.sock")), "first\nsecond\n");
     assert.equal(await evidence.daemonLog(join(root, "missing", "daemon.sock")), null);

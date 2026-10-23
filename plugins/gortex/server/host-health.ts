@@ -34,9 +34,10 @@ export async function readHostHealth(native: HealthPort, options: { retryNow?: b
   try {
     const members = await native.assignments();
     if (members.length === 0) throw new Error("The native catalog is empty; a tracked repository is required to connect to Gortex MCP.");
-    // The repository supplies an admitted transport context, not the scope of these host-wide metrics.
-    // A stall can belong to one checkout, so another repository can still carry the same host-wide request.
-    let stalled: unknown = null, paused: number | null = null;
+    // The repository supplies an admitted transport context, not the scope of these host-wide metrics. Whatever stops
+    // one repository's request (a stall in its checkout, a folder that's gone, a daemon still loading its list of
+    // repositories), another repository can still carry the same host-wide request.
+    let stalled: unknown = null, failed: unknown = null, paused: number | null = null;
     for (const member of members.slice(0, 3)) {
       const until = await native.pausedUntil?.(member.path) ?? null;
       if (until !== null) { paused = paused === null ? until : Math.min(paused, until); continue; }
@@ -44,12 +45,12 @@ export async function readHostHealth(native: HealthPort, options: { retryNow?: b
         const health = await native.daemonHealth(member.path, { background: true });
         return { ...base, state: "available" as const, health, error: null, pausedUntil: null, warmup: health.ready ? null : await warmup() };
       } catch (error) {
-        if (!isTransient(error)) throw error;
-        stalled = error;
+        if (isTransient(error)) stalled = error; else failed ??= error;
         // A refusal may have paused the remaining repositories too.
       }
     }
     if (stalled === null && paused !== null) return { ...base, state: "paused" as const, health: null, error: pausedMessage(paused - now()), pausedUntil: new Date(paused).toISOString(), warmup: await warmup() };
+    if (stalled === null) throw failed;
     return { ...base, state: "busy" as const, health: null, error: healthError(stalled), pausedUntil: paused === null ? null : new Date(paused).toISOString(), warmup: await warmup() };
   } catch (error) {
     return { ...base, state: "unavailable" as const, health: null, error: healthError(error), pausedUntil: null, warmup: null };

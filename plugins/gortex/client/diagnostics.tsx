@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { diagnosticsLatestRpc, diagnosticsRepairRpc, diagnosticsRunRpc, type DiagnosticCheck, type DiagnosticsReport, type Remedy } from "../shared/diagnostics-contracts.ts";
+import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc, type DiagnosticCheck, type Remedy } from "../shared/diagnostics-contracts.ts";
 import { Action, Badge, Button, Card, Disclosure, Notice, SectionHeading } from "./controls.tsx";
 import { useHostDateTime } from "./host-time.tsx";
 
@@ -11,21 +11,31 @@ const checkLabel = { pass: "OK", warn: "Check", fail: "Problem", skipped: "Skipp
 const reportTone = { healthy: "success", degraded: "warning", broken: "danger" } as const;
 const reportLabel = { healthy: "Ready", degraded: "Degraded", broken: "Not working" } as const;
 
-/** Runs Gortex health checks on the selected host and offers the repairs they justify, one confirmation each. */
+/**
+ * Runs Gortex health checks on the selected host and offers the repairs they justify, one confirmation each. Checks and
+ * repairs that outlast a plugin call finish on the host, and the panel follows them until they do.
+ */
 export function DiagnosticsPanel({ host, theme }: Pick<PluginSurfaceProps, "host" | "theme">) {
-  const runCheck = useRpc(diagnosticsRunRpc), latest = useRpc(diagnosticsLatestRpc), repairRpc = useRpc(diagnosticsRepairRpc);
+  const runCheck = useRpc(diagnosticsRunRpc), latest = useRpc(diagnosticsLatestRpc), repairRpc = useRpc(diagnosticsRepairRpc), pollRepair = useRpc(diagnosticsRepairJobRpc);
+  const queries = useQueryClient(), latestKey = [host.id, "gortex", "diagnostics-latest"];
   const dateTime = useHostDateTime();
-  const [report, setReport] = useState<DiagnosticsReport | null>(null);
   const [confirming, setConfirming] = useState<Remedy | null>(null);
   const [evidence, setEvidence] = useState<string | null>(null);
-  const previous = useQuery({ queryKey: [host.id, "gortex", "diagnostics-latest"], queryFn: () => latest({}), retry: false, staleTime: Infinity });
-  const current = report ?? previous.data?.report ?? null;
-  const run = useMutation({ mutationFn: () => runCheck({}), onSuccess: next => { setReport(next); setConfirming(null); } });
+  const [jobId, setJobId] = useState<string | null>(null);
+  const checks = useQuery({ queryKey: latestKey, queryFn: () => latest({}), retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchInterval: query => query.state.data?.running && !query.state.error ? 2000 : false });
+  const current = checks.data?.report ?? null;
+  const run = useMutation({ mutationFn: () => runCheck({}), onSuccess: next => { queries.setQueryData(latestKey, next); setConfirming(null); } });
+  const job = useQuery({ queryKey: [host.id, "gortex", "diagnostics-job", jobId], queryFn: () => pollRepair({ id: jobId! }), enabled: jobId !== null, retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchInterval: query => query.state.error || query.state.data?.stage === "done" ? false : 2000 });
   const repair = useMutation({
     mutationFn: (remedy: Remedy) => repairRpc({ reportId: current!.id, remedyId: remedy.id }),
-    onSuccess: job => { setConfirming(null); if (job.report) setReport(job.report); },
+    onSuccess: next => { setConfirming(null); queries.setQueryData([host.id, "gortex", "diagnostics-job", next.id], next); setJobId(next.id); },
   });
-  const busy = run.isPending || repair.isPending;
+  const repaired = job.data ?? null;
+  // A finished repair re-ran the checks; the host's latest report is that run, or a newer one.
+  useEffect(() => { if (repaired?.stage === "done") void queries.invalidateQueries({ queryKey: latestKey }); }, [repaired?.id, repaired?.stage]);
+  const checking = run.isPending || (checks.data?.running === true && !checks.error);
+  const repairing = repair.isPending || (repaired !== null && repaired.stage !== "done" && !job.error);
+  const busy = checking || repairing;
   const Check = ({ check }: { check: DiagnosticCheck }) => <View style={{ gap: 4, paddingVertical: 8, borderTopWidth: 1, borderColor: theme.colors.border }}>
     <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <Badge theme={theme} label={checkLabel[check.state]} tone={checkTone[check.state]} />
@@ -41,17 +51,19 @@ export function DiagnosticsPanel({ host, theme }: Pick<PluginSurfaceProps, "host
       <SectionHeading theme={theme} title="Diagnostics" icon="Stethoscope" subtitle={`Check Gortex on ${host.label} and fix what it finds`} />
       <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
         {current && <Badge theme={theme} label={reportLabel[current.state]} tone={reportTone[current.state]} />}
-        <Action title={run.isPending ? "Checking…" : current ? "Run again" : "Run diagnostics"} icon="Stethoscope" primary={!current} theme={theme} disabled={busy} onPress={() => run.mutate()} />
+        <Action title={checking ? "Checking…" : current ? "Run again" : "Run diagnostics"} icon="Stethoscope" primary={!current} theme={theme} disabled={busy} onPress={() => run.mutate()} />
       </View>
     </View>
-    {!current && !run.isPending && <Notice theme={theme} text="Checks the Gortex executable, the daemon, its MCP responses, repository indexes and per-repository access. Nothing changes until you choose a fix." />}
-    {run.isPending && <Notice theme={theme} text="Running checks on this host…" />}
+    {!current && !checking && <Notice theme={theme} text="Checks the Gortex executable, the daemon, its MCP responses, repository indexes and per-repository access. Nothing changes until you choose a fix." />}
+    {checking && <Notice theme={theme} text="Running checks on this host…" />}
     {run.error && <Notice theme={theme} error text={run.error.message} />}
-    {repair.isPending && <Notice theme={theme} text="Applying the fix, then re-running the checks…" />}
+    {checks.error && checks.data?.running && <Notice theme={theme} error text={`Couldn't follow the checks: ${checks.error.message}`} />}
+    {repairing && <Notice theme={theme} text={repaired?.stage === "verifying" ? "Re-running the checks after the fix…" : "Applying the fix, then re-running the checks…"} />}
     {repair.error && <Notice theme={theme} error text={repair.error.message} />}
-    {repair.data && !repair.isPending && <Notice theme={theme} error={repair.data.outcome === "failed"} text={[
-      repair.data.outcome === "fixed" ? `Fixed: ${repair.data.title}.` : repair.data.outcome === "unchanged" ? `${repair.data.title} finished, but checks still report problems.` : `${repair.data.title} failed.`,
-      ...repair.data.steps, repair.data.error ?? "",
+    {job.error && <Notice theme={theme} error text={`Couldn't follow the fix: ${job.error.message}`} />}
+    {repaired?.stage === "done" && <Notice theme={theme} error={repaired.outcome === "failed"} text={[
+      repaired.outcome === "fixed" ? `Fixed: ${repaired.title}.` : repaired.outcome === "unchanged" ? `${repaired.title} finished, but checks still report problems.` : `${repaired.title} failed.`,
+      ...repaired.steps, repaired.error ?? "",
     ].filter(Boolean).join(" ")} />}
     {current && <>
       <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>{current.summary}</Text>
@@ -67,7 +79,7 @@ export function DiagnosticsPanel({ host, theme }: Pick<PluginSurfaceProps, "host
         <Notice theme={theme} text={confirming.detail} />
         {confirming.risk === "host-wide" && <Notice theme={theme} error text="This affects every Gortex client on this host, including agents that are running right now." />}
         <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-          <Action title={repair.isPending ? "Working…" : "Confirm"} icon="Check" primary theme={theme} disabled={busy} onPress={() => repair.mutate(confirming)} />
+          <Action title={repairing ? "Working…" : "Confirm"} icon="Check" primary theme={theme} disabled={busy} onPress={() => repair.mutate(confirming)} />
           <Button title="Cancel" theme={theme} disabled={busy} onPress={() => setConfirming(null)} />
         </View>
       </View>}

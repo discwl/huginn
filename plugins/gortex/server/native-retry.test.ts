@@ -55,6 +55,12 @@ test("host health describes a warming daemon rather than repeating its internal 
   assert.equal(full.state, "busy"); assert.match(full.error!, /as many requests as it allows/);
   const other = await readHostHealth({ assignments: async () => [{ path: process.cwd() }], daemonHealth: async () => { throw new Error("socket closed"); } });
   assert.equal(other.error, "socket closed");
+  // Any other failure for one repository, such as a daemon still loading its list of repositories, tries the next too.
+  const untracked = await readHostHealth({
+    assignments: async () => [{ path: "C:/huginn" }, { path: "C:/fine" }],
+    daemonHealth: async path => { if (path === "C:/huginn") throw new Error("MCP error -32000: repository not tracked: C:\\huginn"); return { ready: true } as never; },
+  });
+  assert.equal(untracked.state, "available");
 });
 
 test("host health doesn't ask about repositories whose requests are paused, and Try now asks again", async () => {

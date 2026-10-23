@@ -27,8 +27,13 @@ export interface DiagnosticsCli {
   /** Optional: hosts without Git skip the worktree check. */
   git?(args: string[], cwd: string): Promise<string>;
 }
-/** evidence: what the checks read without asking Gortex (its log, worktree records); those checks are left out without it. */
-export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number; clock?: () => number; wait?: (ms: number) => Promise<unknown>; evidence?: DiagnosticsEvidence | null }
+/**
+ * evidence: what the checks read without asking Gortex (its log, worktree records); those checks are left out without it.
+ * answerWithinMs: how long start() and repair() wait before answering with work still running.
+ */
+export interface DiagnosticsOptions { maxRepositories?: number; now?: () => number; clock?: () => number; wait?: (ms: number) => Promise<unknown>; evidence?: DiagnosticsEvidence | null; answerWithinMs?: number }
+/** The checks as diagnostics.run and diagnostics.latest report them: the latest report, and whether a run is going. */
+export interface DiagnosticsRunState { report: DiagnosticsReport | null; running: boolean }
 
 const REINDEX = "reindex:", PRUNE = "prune:";
 // Warm-up after a start is normally seconds; past this, a discovery failure on every repository is a wedge.
@@ -45,8 +50,24 @@ const TIMEOUT_WINDOW_MS = 15 * 60_000, WORKTREE_WINDOW_MS = 2 * 60 * 60_000;
 const NOT_AGENTS = new Set(["", "cli", "paseo-gortex"]);
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 const REINDEX_WINDOW_MS = 60 * 60_000, CRASH_WINDOW_MS = 24 * 60 * 60_000;
-// A startup longer than this delays every agent's first Gortex requests noticeably.
+// Gortex answering queries this long after a start delays every agent's first Gortex requests noticeably.
 const SLOW_STARTUP_SECONDS = 300;
+// Paseo waits 30 seconds for a plugin call. On a host where Git starts slowly the checks take longer, and a repair that
+// restarts Gortex takes minutes, so both answer after this and carry on in the background.
+const ANSWER_WITHIN_MS = 20_000;
+/** `promise`'s value if it settles within `ms`, else `late`. */
+function within<T, U>(promise: Promise<T>, ms: number, late: U): Promise<T | U> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<U>(resolve => { timer = setTimeout(() => resolve(late), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+/** What the evidence checks read. They start alongside the probes: none of it asks Gortex anything. */
+type EvidenceReads = {
+  log: Promise<string | null>;
+  crash: Promise<{ text: string; writtenAt: number } | null>;
+  changedAt: Promise<number | null>;
+  changes: Promise<WorktreeChange[]>;
+};
 /** "45 s", "3 min", "2 h", "2 h 5 min". */
 function duration(seconds: number): string {
   if (seconds < 90) return `${Math.round(seconds)} s`;
@@ -94,6 +115,8 @@ export class GortexDiagnostics {
   private jobs = new Map<string, RepairJob>();
   private latestId: string | null = null;
   private running: Promise<unknown> | null = null;
+  private checking: Promise<DiagnosticsReport> | null = null;
+  private answerWithinMs: number;
 
   constructor(native: DiagnosticsNative, admin = new RepositoryAdminLock(), invalidate: () => void = () => {}, cli: DiagnosticsCli = hostCli, options: DiagnosticsOptions = {}) {
     this.native = native; this.cli = cli; this.admin = admin; this.invalidate = invalidate;
@@ -102,6 +125,26 @@ export class GortexDiagnostics {
     this.clock = options.clock ?? (() => performance.now());
     this.wait = options.wait ?? (ms => delay(ms));
     this.evidence = options.evidence ?? null;
+    this.answerWithinMs = options.answerWithinMs ?? ANSWER_WITHIN_MS;
+  }
+
+  /**
+   * Runs the checks, or joins the run already going. Answers with the report when the checks finish in time;
+   * otherwise running is true, and state() reports them once they finish.
+   */
+  async start(): Promise<DiagnosticsRunState> {
+    const run = this.checking ??= this.checkSafely().finally(() => { this.checking = null; });
+    const report = await within(run, this.answerWithinMs, null);
+    return report ? { report, running: false } : this.state();
+  }
+
+  state(): DiagnosticsRunState { return { report: this.latest(), running: this.checking !== null }; }
+
+  /** run(), with an unexpected error reported as a failed check rather than lost in the background. */
+  private async checkSafely(): Promise<DiagnosticsReport> {
+    const started = this.now();
+    try { return await this.run(); }
+    catch (error) { return this.finish(started, [{ id: "checks", title: "Checks", state: "fail", detail: "The checks stopped before they finished. Run them again.", evidence: trim(message(error)) }], []); }
   }
 
   /** One repository, the way an agent meets it: a refused first request is repeated right away. */
@@ -179,6 +222,8 @@ export class GortexDiagnostics {
       return this.finish(started, checks, [...remedies.values()]);
     }
     checks.push({ id: "mcp", title: "MCP responses", state: "pass", detail: `Gortex answered the plugin and reports ${rows.length} tracked ${rows.length === 1 ? "repository" : "repositories"}.`, evidence: null });
+    const probes = rows.slice(0, this.maxRepositories);
+    const reads = this.evidence ? this.startReads(this.evidence, socket, probes.map(row => row.path)) : null;
 
     // 4. Index state per repository, from Gortex's own catalog.
     let repoRows: RepoRow[] = [];
@@ -207,18 +252,20 @@ export class GortexDiagnostics {
     }
 
     // 5. Per-repository identity: what fails first when an agent starts in a repo.
-    const probes = rows.slice(0, this.maxRepositories);
     // Gortex runs Git before it answers a request and allows that 250 ms; slow process starts on the host
     // (CPU load, antivirus) make first requests fail with "checkout discovery is pending".
     let gitMs: number | null = null;
     if (this.cli.git && probes.length) {
       const git = this.cli.git, samples: number[] = [];
-      for (let i = 0; i < 3; i++) {
+      // Three starts, or two slow ones: the middle of three would be slow too, and each slow start can take a second.
+      const settled = () => samples.length === 3 || (samples.length === 2 && samples.every(sample => sample > SLOW_GIT_MS));
+      while (!settled()) {
         const began = this.clock();
         try { await git(["rev-parse", "--git-dir"], probes[0].path); samples.push(this.clock() - began); } catch { break; }
       }
-      if (samples.length === 3) {
-        gitMs = Math.round(samples.sort((a, b) => a - b)[1]);
+      if (settled()) {
+        // The second slowest: the middle of three, or the faster of two slow starts.
+        gitMs = Math.round(samples.sort((a, b) => a - b)[samples.length - 2]);
         const slow = gitMs > SLOW_GIT_MS;
         checks.push({
           id: "git", title: "Git speed", state: slow ? "warn" : "pass",
@@ -288,7 +335,7 @@ export class GortexDiagnostics {
       });
       for (const item of stale) add({ id: `${PRUNE}${item.path}`, title: `Prune stale worktrees in ${item.repo}`, detail: "Runs git worktree prune, which removes Git's records of worktrees whose folders are already gone. No files or branches are deleted.", risk: "safe", target: item.path });
     }
-    if (this.evidence) await this.evidenceChecks(this.evidence, checks, { socket, sessions, probes: probes.map(row => row.path), trouble: stuck || discoveryFailures > 0, status: daemonStatus, version, uptime });
+    if (reads) await this.evidenceChecks(reads, checks, { sessions, trouble: stuck || discoveryFailures > 0, status: daemonStatus, version, uptime });
     if (warming) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again. Gortex refuses requests while it discovers checkouts, which normally clears within minutes of a daemon start or a new worktree.", risk: "safe", target: null });
     if (failures.length && !busy && !warming && !stuck) {
       add({ id: "daemon-reload", title: "Reload Gortex configuration", detail: "Runs gortex daemon reload, which re-reads config.yaml and picks up added or removed repositories without a restart.", risk: "safe", target: null });
@@ -297,10 +344,19 @@ export class GortexDiagnostics {
     return this.finish(started, checks, [...remedies.values()]);
   }
 
+  private startReads(evidence: DiagnosticsEvidence, socket: string | null, repositories: string[]): EvidenceReads {
+    return {
+      log: evidence.daemonLog(socket).catch(() => null),
+      crash: evidence.crashLog(socket).catch(() => null),
+      changedAt: evidence.executableChangedAt().catch(() => null),
+      changes: evidence.worktreeChanges(repositories, this.now() - WORKTREE_WINDOW_MS).catch((): WorktreeChange[] => []),
+    };
+  }
+
   /** Checks read without asking Gortex: timeouts in its log, recent worktree changes, and chats older than its last update. */
-  private async evidenceChecks(evidence: DiagnosticsEvidence, checks: DiagnosticCheck[], context: { socket: string | null; sessions: DaemonSession[]; probes: string[]; trouble: boolean; status: DaemonStatus | null; version: string; uptime: number | null }): Promise<void> {
+  private async evidenceChecks(reads: EvidenceReads, checks: DiagnosticCheck[], context: { sessions: DaemonSession[]; trouble: boolean; status: DaemonStatus | null; version: string; uptime: number | null }): Promise<void> {
     const now = this.now();
-    const log = await evidence.daemonLog(context.socket).catch(() => null);
+    const log = await reads.log;
     this.startupCheck(checks, context.status, context.uptime, log, now);
     let timedOut = 0;
     if (log === null) checks.push({ id: "timeouts", title: "Requests that ran out of time", state: "skipped", detail: "Gortex's daemon log can't be read on this host, so request timeouts weren't checked.", evidence: null });
@@ -321,7 +377,7 @@ export class GortexDiagnostics {
       });
     }
     // Gortex discovers every worktree that's added or removed.
-    const changes = await evidence.worktreeChanges(context.probes, now - WORKTREE_WINDOW_MS).catch((): WorktreeChange[] => []);
+    const changes = await reads.changes;
     if (changes.length) {
       const added = changes.filter(change => change.change === "added").length, removed = changes.length - added;
       const what = added && removed ? `${plural(added, "worktree was", "worktrees were")} added and ${removed} removed`
@@ -335,10 +391,10 @@ export class GortexDiagnostics {
         evidence: trim(changes.slice(0, 8).map(change => `${change.change} ${stamp(change.at).slice(11)} ${change.path}${change.source === "paseo" ? " (Paseo)" : ""}`).join(" · "), 400),
       });
     }
-    await this.crashCheck(evidence, checks, context.socket, log, now);
+    this.crashCheck(checks, await reads.crash, log, now);
     this.reindexCheck(checks, context.version, log, now);
     // A chat's Gortex tools come from the Gortex that was installed when it connected.
-    const changedAt = await evidence.executableChangedAt().catch(() => null);
+    const changedAt = await reads.changedAt;
     const agents = context.sessions.filter(session => !NOT_AGENTS.has(session.client));
     if (changedAt !== null && agents.length) {
       const older = agents.filter(session => { const seconds = uptimeSeconds(session.connected); return seconds !== null && now - seconds * 1000 < changedAt; });
@@ -387,18 +443,19 @@ export class GortexDiagnostics {
     const longest = (timeline?.steps ?? []).filter(step => (step.seconds ?? 0) >= 1).sort((a, b) => (b.seconds ?? 0) - (a.seconds ?? 0)).slice(0, 3);
     const repo = timeline?.slowestRepo && timeline.slowestRepo.seconds >= 1 ? timeline.slowestRepo : null;
     if (seconds === null && !longest.length) return;
-    const slow = seconds !== null && seconds > SLOW_STARTUP_SECONDS;
+    // What agents wait for is Gortex answering queries; the rest of a startup runs alongside them. Gortex before 0.64.9
+    // doesn't log when that was, so its startup time alone isn't a verdict.
+    const slow = queryable !== null && queryable > SLOW_STARTUP_SECONDS;
     const detail = [
       seconds === null ? null : `The last startup took ${duration(seconds)}${queryable !== null && seconds - queryable >= 1 ? `, and Gortex answered queries after ${duration(queryable)}` : ""}.`,
       longest.length ? `The longest parts were ${longest.map(step => `${stepLabel(step.step)} (${duration(step.seconds!)})`).join(", ")}${repo ? `; ${repo.path.split(/[\\/]/).filter(Boolean).pop()} took longest to load (${duration(repo.seconds)})` : ""}.` : null,
-      slow ? "A startup this long delays every agent's first Gortex requests; other programs using the CPU or scanning each file usually explain it." : null,
+      slow ? "Until Gortex answers queries it refuses agents' requests, so a startup this slow holds them up after every restart; other programs using the CPU or scanning each file usually explain it." : null,
     ].filter(Boolean).join(" ");
     checks.push({ id: "startup", title: "Startup", state: slow ? "warn" : "pass", detail, evidence: steps ? trim(steps, 400) : null });
   }
 
   /** A crash in the last day, from Gortex 0.64.9's crash log or stack dumps that older versions wrote into the daemon log. */
-  private async crashCheck(evidence: DiagnosticsEvidence, checks: DiagnosticCheck[], socket: string | null, log: string | null, now: number): Promise<void> {
-    const stderr = await evidence.crashLog(socket).catch(() => null);
+  private crashCheck(checks: DiagnosticCheck[], stderr: { text: string; writtenAt: number } | null, log: string | null, now: number): void {
     if (log === null && stderr === null) {
       checks.push({ id: "crashes", title: "Crashes", state: "skipped", detail: "Gortex's logs can't be read on this host, so crashes weren't checked.", evidence: null });
       return;
@@ -472,7 +529,8 @@ export class GortexDiagnostics {
     while (this.jobs.size > 20) this.jobs.delete(this.jobs.keys().next().value!);
     const release = this.admin.acquire();
     this.running = this.execute(remedy, job).finally(() => { this.running = null; release(); });
-    await this.running;
+    // A job that outlasts this is followed with job().
+    await within(this.running, this.answerWithinMs, null);
     return structuredClone(job);
   }
 

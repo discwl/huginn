@@ -58,7 +58,7 @@ test("a startup still loading repositories is described, with its current step, 
   assert.ok(!report.remedies.some(remedy => remedy.id === "daemon-restart"));
 });
 
-test("after startup, how long it took and its slowest steps; a long one is a warning", async () => {
+test("after startup, how long it took and its slowest steps; answering queries late is a warning", async () => {
   const log = [
     line({ ts: at(3600), msg: "daemon: warmup step start", step: "prelude" }),
     line({ ts: at(3594), msg: "daemon: warmup step complete", step: "prelude", elapsed: 6 }),
@@ -70,9 +70,14 @@ test("after startup, how long it took and its slowest steps; a long one is a war
   const quick = check(await diagnostics({ log }).run(), "startup")!;
   assert.equal(quick.state, "pass");
   assert.equal(quick.detail, "The last startup took 34 s. The longest parts were resolve compute (20 s), prelude (6 s).");
-  const slow = check(await diagnostics({ status: READY.replace("warmup 34s", "warmup 7m12s"), log }).run(), "startup")!;
+  // Gortex before 0.64.9 doesn't log when it began answering queries, so a long startup alone isn't a warning.
+  const long = check(await diagnostics({ status: READY.replace("warmup 34s", "warmup 7m12s"), log }).run(), "startup")!;
+  assert.equal(long.state, "pass");
+  assert.equal(long.detail, "The last startup took 7 min. The longest parts were resolve compute (20 s), prelude (6 s).");
+  const queryable = line({ ts: at(3200), msg: "daemon: graph queryable", warmup: 400 });
+  const slow = check(await diagnostics({ status: READY.replace("warmup 34s", "warmup 9m"), log: `${log}\n${queryable}` }).run(), "startup")!;
   assert.equal(slow.state, "warn");
-  assert.match(slow.detail, /^The last startup took 7 min\. The longest parts were .* A startup this long delays every agent's first Gortex requests/);
+  assert.match(slow.detail, /^The last startup took 9 min, and Gortex answered queries after 7 min\. The longest parts were .* Until Gortex answers queries it refuses agents' requests/);
 });
 
 test("a startup as Gortex 0.64.9 logs it: phases, the slowest repository, and when it answered queries", async () => {

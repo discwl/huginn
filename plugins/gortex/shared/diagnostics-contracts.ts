@@ -38,8 +38,13 @@ export const repairJobSchema = z.object({
 });
 export type RepairJob = z.infer<typeof repairJobSchema>;
 
-export const diagnosticsRunRpc = defineRpc({ name: "diagnostics.run", input: z.object({}), output: diagnosticsReportSchema });
-export const diagnosticsLatestRpc = defineRpc({ name: "diagnostics.latest", input: z.object({}), output: z.object({ report: diagnosticsReportSchema.nullable() }) });
-// Applies one remedy the report offered, then re-runs the checks to report the result.
+// Paseo gives a plugin call 30 seconds, and on a slow host the checks take longer. run answers with the report when the
+// checks finish within about 20 seconds; otherwise running is true and they finish in the background, where latest
+// reports them (the panel polls it).
+const runStateSchema = z.object({ report: diagnosticsReportSchema.nullable(), running: z.boolean() });
+export const diagnosticsRunRpc = defineRpc({ name: "diagnostics.run", input: z.object({}), output: runStateSchema });
+export const diagnosticsLatestRpc = defineRpc({ name: "diagnostics.latest", input: z.object({}), output: runStateSchema });
+// Applies one remedy the report offered, then re-runs the checks to report the result. Like run, it answers within
+// about 20 seconds; a job still running is followed with diagnostics.repair-job.
 export const diagnosticsRepairRpc = defineRpc({ name: "diagnostics.repair", input: z.object({ reportId: z.string().uuid(), remedyId: z.string().max(400) }), output: repairJobSchema });
 export const diagnosticsRepairJobRpc = defineRpc({ name: "diagnostics.repair-job", input: z.object({ id: z.string().uuid() }), output: repairJobSchema });
