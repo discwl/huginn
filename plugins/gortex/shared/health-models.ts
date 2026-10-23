@@ -18,6 +18,8 @@ export const hostHealthSchema = z.object({
   state: z.enum(["available", "busy", "paused", "unavailable"]),
   health: daemonHealthSchema.nullable(), error: z.string().nullable(),
   pausedUntil: z.string().nullable(),
+  // While Gortex starts: "Starting: 3 of 5 repositories loaded · step: … (running 42 s)".
+  warmup: z.string().nullable(),
 });
 export const indexSummarySchema = z.object({
   status: z.string(), health_score: z.number().min(0).max(100),

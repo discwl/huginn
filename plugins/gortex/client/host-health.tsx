@@ -49,6 +49,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
         {onDetails && <Action theme={theme} title="View health" icon="ArrowUpRight" onPress={onDetails} />}
       </View>
     </View>
+    {report.data?.warmup && <Notice theme={theme} text={report.data.warmup} />}
     {(report.error || report.data?.error) && <Notice theme={theme} error={!busy} text={report.error?.message ?? report.data?.error ?? "Health is unavailable."} />}
     {retry.error && <Notice theme={theme} error text={retry.error.message} />}
   </View>;
@@ -62,6 +63,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
       <Action title={checking ? "Checking…" : busy ? "Try now" : "Refresh health"} icon="RefreshCw" disabled={checking} theme={theme} onPress={() => retry.mutate()} />
     </View>
     {!report.data && report.isFetching && <Notice theme={theme} text="Connecting to Gortex for a health snapshot…" />}
+    {report.data?.warmup && <Notice theme={theme} text={report.data.warmup} />}
     {report.error && <Notice theme={theme} error text={`Health unavailable: ${report.error.message}`} />}
     {report.data?.error && <Notice theme={theme} error={!busy} text={report.data.error} />}
     {retry.error && <Notice theme={theme} error text={retry.error.message} />}

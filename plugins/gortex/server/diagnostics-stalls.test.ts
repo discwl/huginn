@@ -31,7 +31,7 @@ function diagnostics(options: { rows?: NativeAssignment[]; status?: string; info
     info: async path => { options.info?.(path); return { workspace: "w", project: "p", mode: "workspace", members: [{ name: "r", path }] }; },
     reloadConfiguration: async () => {}, rebuildIndex: async () => {}, refreshContexts: async () => {},
   };
-  const evidence = options.evidence === null ? null : { daemonLog: async () => "", executableChangedAt: async () => null, worktreeChanges: async () => [], ...options.evidence };
+  const evidence: DiagnosticsEvidence | null = options.evidence === null ? null : { daemonLog: async () => "", crashLog: async () => null, executableChangedAt: async () => null, worktreeChanges: async () => [], ...options.evidence };
   return new GortexDiagnostics(native, new RepositoryAdminLock(), () => {}, cli, { wait: async () => {}, now: () => NOW, evidence });
 }
 
@@ -69,7 +69,7 @@ test("a quiet log passes, an unreadable one skips the check, and no evidence lea
   assert.equal(check(await diagnostics({ evidence: { daemonLog: async () => null } }).run(), "timeouts")!.state, "skipped");
   const without = await diagnostics({ evidence: null }).run();
   assert.equal(without.state, "healthy");
-  for (const id of ["timeouts", "worktree-changes", "sessions"]) assert.equal(check(without, id), undefined);
+  for (const id of ["timeouts", "worktree-changes", "sessions", "startup", "crashes", "reindexes"]) assert.equal(check(without, id), undefined);
 });
 
 test("recent worktree changes are listed, and flagged while Gortex is refusing", async () => {

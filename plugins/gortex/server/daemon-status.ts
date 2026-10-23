@@ -1,10 +1,37 @@
 export interface DaemonSession { id: string; client: string; version: string; connected: string; cwd: string }
+/**
+ * A tracked repository in the status table. state is Gortex's own label ("loading", "not indexed", "MISSING",
+ * "DEGRADED", "EMPTY", "ok"); null when the table has no state column, which Gortex leaves out while every
+ * repository is fine. "loading" (Gortex 0.64.9 and later) means the daemon is still loading it after a start.
+ */
+export interface DaemonRepo { name: string; path: string; state: string | null }
 export interface DaemonStatus {
   running: boolean; ready: boolean; warming: boolean;
   version: string | null; pid: number | null; uptime: string | null; state: string | null;
   /** The daemon's socket path; its log is written beside it. */
   socket: string | null;
   sessions: DaemonSession[];
+  repos: DaemonRepo[];
+}
+
+/** The "tracked repos:" table, read by its header names; the trailing "other" row and footers have no path. */
+function parseRepos(text: string): DaemonRepo[] {
+  const start = text.indexOf("tracked repos:");
+  if (start < 0) return [];
+  const end = text.indexOf("MCP sessions:", start);
+  let header: string[] | null = null;
+  const repos: DaemonRepo[] = [];
+  for (const line of text.slice(start, end < 0 ? undefined : end).split(/\r?\n/)) {
+    if (!line.includes("│")) continue;
+    const cells = line.split("│").slice(1, -1).map(cell => cell.trim());
+    if (!header) { if (cells[0] === "repo") header = cells; continue; }
+    const at = (name: string) => { const index = header!.indexOf(name); return index < 0 ? "" : cells[index] ?? ""; };
+    const path = at("path");
+    if (!cells[0] || !/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(path)) continue;
+    repos.push({ name: cells[0], path, state: header.includes("state") ? at("state") || null : null });
+    if (repos.length >= 500) break;
+  }
+  return repos;
 }
 
 /** One-line `key   value` fields at the top of `gortex daemon status`. */
@@ -32,10 +59,11 @@ export function parseDaemonStatus(text: string): DaemonStatus {
   }
   return {
     running: pid !== null && /^\d+$/.test(pid),
-    ready: state !== null && /^ready\b/.test(state),
+    // "ready (warmup 34s)", "ready — queryable (warmup 34s); …", or "degraded — …; queryable": all answer queries.
+    ready: state !== null && (/^ready\b/.test(state) || /\bqueryable\b/.test(state)),
     warming: state !== null && /warming up/.test(state),
     version: field(text, "daemon"), pid: pid !== null && /^\d+$/.test(pid) ? Number(pid) : null,
-    uptime: field(text, "uptime"), state, socket: field(text, "socket"), sessions,
+    uptime: field(text, "uptime"), state, socket: field(text, "socket"), sessions, repos: parseRepos(text),
   };
 }
 

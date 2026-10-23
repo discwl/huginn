@@ -34,8 +34,11 @@ export class WorkspaceLibrary {
   /** Last verified identity per path. Reused only while Gortex is warming up or refusing, so a busy discovery lane does not flip rows to unavailable. */
   private resolved = new Map<string, Repository>();
 
-  /** background: a catalog page, whose rows aren't asked about while Gortex is refusing them. */
-  private async resolve(row: NativeAssignment, options: RequestOptions = {}): Promise<Repository> {
+  /**
+   * background: a catalog page, whose rows aren't asked about while Gortex is refusing them. starting: Gortex is starting,
+   * so a refusal means the repository is still loading.
+   */
+  private async resolve(row: NativeAssignment, options: RequestOptions = {}, starting = false): Promise<Repository> {
     const base = { name: row.repo, path: row.path, declaredWorkspace: row.workspace, declaredProject: row.project, assignmentSource: row.source };
     try {
       const path = await realpath(row.path);
@@ -52,6 +55,7 @@ export class WorkspaceLibrary {
       return repository;
     } catch (error) {
       const text = message(error);
+      if (starting && (text === warmingUpMessage || isWaiting(error))) return this.loadingRow(row);
       if (text === warmingUpMessage || text === busyMessage || isWaiting(error)) {
         // A verified identity from this session stays usable while discovery catches up.
         const previous = this.resolved.get(repositoryPathKey(row.path));
@@ -61,13 +65,29 @@ export class WorkspaceLibrary {
     }
   }
 
+  /** A repository Gortex is still loading after a start: shown as loading, without asking Gortex about it. */
+  private loadingRow(row: NativeAssignment): Repository {
+    const previous = this.resolved.get(repositoryPathKey(row.path));
+    const base = previous ?? { name: row.repo, path: row.path, declaredWorkspace: row.workspace, declaredProject: row.project, assignmentSource: row.source, workspaceId: null, projectId: null, graphName: null };
+    return { ...base, state: "loading", error: "Gortex is still loading this repository after starting. It's available in a moment." };
+  }
+
   async catalog(offset = 0, options: Partial<CatalogInput> = {}): Promise<Catalog> {
     const input = catalogInputSchema.parse({ ...options, offset });
-    const [version, rows] = await Promise.all([this.native.version(), this.native.assignments()]);
+    const notStarting = { starting: false, loading: [] as string[] };
+    const [version, rows, startup] = await Promise.all([
+      this.native.version(), this.native.assignments(),
+      this.native.startup ? this.native.startup().catch(() => notStarting) : Promise.resolve(notStarting),
+    ]);
+    const loading = new Set(startup.loading.map(repositoryPathKey));
     const merged = await this.projects.merge(rows, input.paseoProjects);
     const { rows: visibleRows, ...page } = pageAssignments(merged.rows, input);
     const repositories: Repository[] = [];
-    for (const row of visibleRows) repositories.push(merged.candidates.get(repositoryPathKey(row.path)) ?? await this.resolve(row, { background: true }));
+    // While Gortex starts, each row is asked once: one it still refuses is loading, not unavailable.
+    for (const row of visibleRows) {
+      const key = repositoryPathKey(row.path);
+      repositories.push(merged.candidates.get(key) ?? (loading.has(key) ? this.loadingRow(row) : await this.resolve(row, { background: true, single: startup.starting }, startup.starting)));
+    }
     return {
       version, repositories, ...page,
       observedAt: new Date().toISOString(),

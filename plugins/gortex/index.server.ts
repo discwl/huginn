@@ -33,6 +33,9 @@ import { PluginUpdater } from "./server/plugin-updater.ts";
 import { pluginUpdateApplyRpc, pluginUpdateCheckRpc } from "./shared/plugin-update-contracts.ts";
 import { GortexDiagnostics } from "./server/diagnostics.ts";
 import { CheckoutActivity, hostEvidence } from "./server/diagnostics-evidence.ts";
+import { readWarmupSummary } from "./server/warmup.ts";
+import { runProcess } from "./server/process-runner.ts";
+import { homedir } from "node:os";
 import { hostSettingsIo, readHostSettings } from "./server/host-settings.ts";
 import { hostSettingsRpc } from "./shared/host-settings-contracts.ts";
 import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc } from "./shared/diagnostics-contracts.ts";
@@ -43,7 +46,9 @@ export default function contribute(server: PluginServerContext) {
     return { timeZone, locale };
   });
   const nativePicker = new NativeFolderPicker();
-  server.handle(hostHealthRpc, ({ retryNow }) => readHostHealth(native, { retryNow }));
+  // While Gortex starts, Host health adds a line from `daemon status` and the startup steps in its log.
+  const warmup = () => readWarmupSummary({ status: () => runProcess("gortex", ["daemon", "status"], homedir(), { timeoutMs: 15_000, maxBytes: 512 * 1024 }), log: socket => evidence.daemonLog(socket) });
+  server.handle(hostHealthRpc, ({ retryNow }) => readHostHealth(native, { retryNow, warmup }));
   server.handle(hostSavingsRpc, readHostSavings);
   server.handle(nativePickerCapabilitiesRpc, () => nativePicker.capabilities());
   server.handle(nativePickerStartRpc, ({ initialPath }) => nativePicker.start(initialPath));
@@ -78,7 +83,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(suggestStartRpc, ({ path }, { paseo }) => suggester.start(path, paseo));
   server.handle(suggestJobRpc, ({ id }) => suggester.job(id));
   server.handle(suggestLatestRpc, async ({ path }) => ({ job: await suggester.latestFor(path) }));
-  const diagnostics = new GortexDiagnostics(native, admin, () => library.close(), undefined, { evidence: hostEvidence(checkoutActivity) });
+  const evidence = hostEvidence(checkoutActivity);
+  const diagnostics = new GortexDiagnostics(native, admin, () => library.close(), undefined, { evidence });
   server.handle(diagnosticsRunRpc, () => diagnostics.run());
   server.handle(diagnosticsLatestRpc, () => ({ report: diagnostics.latest() }));
   server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }) => diagnostics.repair(reportId, remedyId));

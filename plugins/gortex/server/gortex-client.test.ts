@@ -130,3 +130,17 @@ test("readiness checks try once, are never paused, and never pause other request
     assert.equal(f.calls(), 4, "a readiness check is sent even while automatic requests are paused");
   } finally { await f.native.close(); }
 });
+
+test("a request refused because the daemon just restarted is sent again, and never pauses anything", async context => {
+  const restarted = () => { throw new McpError(-32097, "Gortex daemon restarted and daemon-owned MCP session state was reset. The request was not executed; re-orient and retry."); };
+  const f = stalling(context, call => call === 1 ? restarted() : { structuredContent: info, content: [] });
+  try {
+    assert.deepEqual(await f.native.info(tmpdir(), { background: true }), info);
+    assert.equal(f.calls(), 2);
+    assert.deepEqual(f.waits, [300]);
+    assert.equal(await f.native.pausedUntil(tmpdir()), null);
+  } finally { await f.native.close(); }
+  // A single-try request still gets that one extra try, since the first was never run.
+  const once = stalling(context, call => call <= 1 ? restarted() : { structuredContent: info, content: [] });
+  try { assert.deepEqual(await once.native.info(tmpdir(), { single: true }), info); } finally { await once.native.close(); }
+});

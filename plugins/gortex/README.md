@@ -36,6 +36,19 @@ repository metadata and exclusions, and explicitly tracking or untracking reposi
   (which Gortex has to discover), and agent chats that were already open when Gortex
   was last updated. Repositories are checked three at a time, and the checks stop
   asking once a whole batch is refused.
+- **Startup visibility** (most useful with Gortex 0.64.9, which reports repositories
+  as "loading" during startup). While Gortex starts, Host health shows how many
+  repositories are loaded and the step running, and the library shows repositories
+  still loading, or still refused, as **Loading** instead of unavailable. Diagnostics'
+  **Startup** check reports how long the last startup took, when Gortex could answer
+  queries, its longest phases and the slowest repository to load, and warns about a
+  startup longer than five minutes. Requests refused because the daemon just
+  restarted ("session state was reset") are sent again.
+- Diagnostics' **Crashes** check reports a crash or stack dump in the last day, from
+  Gortex 0.64.9's `daemon.stderr.log` or from dumps older versions wrote into
+  `daemon.log`. **Full reindexes** lists the last hour's full rebuilds of a
+  repository's index with what triggered each (logged from Gortex 0.64.9 on), and
+  warns when they repeat.
 - On-demand reported token savings and **host index health**. The native
   `workspace.index` report covers every repository and workspace on that daemon;
   its file/node/relationship totals and score are not per-repository statistics.
@@ -127,7 +140,7 @@ restarted. **Diagnostics → Agent chats** lists the ones that were open during 
 
 ## Compatibility
 
-The installed integration runs on Paseo `0.12.0` with Gortex `0.64.8` and Node
+The installed integration runs on Paseo `0.12.0` with Gortex `0.64.9` and Node
 `22.14.0`, and is typechecked against the Paseo plugin SDK `0.12.0`. It was first
 validated with Paseo `0.8.0-beta.1` and Gortex `0.64.3`; the manifest accepts Paseo
 `0.8.0-beta.1` and later. Read adapters accept stable Gortex releases from 0.64.2;
