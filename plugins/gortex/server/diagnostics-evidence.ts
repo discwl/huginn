@@ -67,10 +67,28 @@ async function tail(path: string, bytes: number): Promise<string> {
   } finally { await handle.close(); }
 }
 
+/**
+ * The Git folder a repository's worktrees share, read from its .git where possible: on some hosts each Git start takes
+ * a second, and diagnostics asks this for every repository.
+ */
+async function commonGitDir(repository: string): Promise<string> {
+  const dotGit = join(repository, ".git");
+  const info = await stat(dotGit).catch(() => null);
+  if (info?.isDirectory()) return dotGit;
+  // A linked worktree: its .git file names its own folder, whose commondir file points at the shared one.
+  const own = info?.isFile() ? /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(dotGit, "utf8"))?.[1] : undefined;
+  if (own) {
+    const folder = resolve(repository, own);
+    const common = (await readFile(join(folder, "commondir"), "utf8").catch(() => "")).trim();
+    return common ? resolve(folder, common) : folder;
+  }
+  // A folder inside a repository, or a Git folder kept elsewhere: Git knows.
+  return resolve(repository, (await runProcess("git", ["rev-parse", "--git-common-dir"], repository, { timeoutMs: 10_000, maxBytes: 16_000 })).trim());
+}
+
 /** Worktrees Git created since `since`, from the entries in the repository's shared worktrees folder. */
 async function gitWorktreesAdded(repository: string, since: number): Promise<WorktreeChange[]> {
-  const common = resolve(repository, (await runProcess("git", ["rev-parse", "--git-common-dir"], repository, { timeoutMs: 10_000, maxBytes: 16_000 })).trim());
-  const folder = join(common, "worktrees");
+  const folder = join(await commonGitDir(repository), "worktrees");
   const changes: WorktreeChange[] = [];
   for (const entry of await readdir(folder, { withFileTypes: true }).catch(() => [])) {
     if (!entry.isDirectory()) continue;
@@ -113,8 +131,8 @@ export function hostEvidence(activity: CheckoutActivity): DiagnosticsEvidence {
       catch { return null; }
     },
     async worktreeChanges(repositories, since) {
-      const found = [...activity.recent(since)];
-      for (const repository of repositories) found.push(...await gitWorktreesAdded(repository, since).catch(() => []));
+      const added = await Promise.all(repositories.map(repository => gitWorktreesAdded(repository, since).catch((): WorktreeChange[] => [])));
+      const found = [...activity.recent(since), ...added.flat()];
       const unique = new Map<string, WorktreeChange>();
       for (const change of found) {
         const id = `${change.change}:${key(change.path.replace(/[\\/]+$/, ""))}`;

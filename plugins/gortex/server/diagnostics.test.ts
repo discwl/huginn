@@ -218,6 +218,60 @@ test("a repair runs its action, re-checks, and reports the verified outcome", as
   assert.ok(f.calls.length >= 0);
 });
 
+const settle = async (done: () => boolean) => { for (let i = 0; i < 200 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+test("checks that outlast a plugin call answer as running, finish in the background, and a second request joins them", async () => {
+  const quick = await fixture().diagnostics.start();
+  assert.equal(quick.running, false); assert.equal(quick.report!.state, "healthy");
+  let release!: () => void, runs = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const diagnostics = new GortexDiagnostics(
+    { version: async () => "v", assignments: async () => { runs++; await gate; return rows; }, info: async path => ({ workspace: "w", project: "p", mode: "workspace", members: [{ name: "app", path }] }), reloadConfiguration: async () => {}, rebuildIndex: async () => {}, refreshContexts: async () => {} },
+    new RepositoryAdminLock(), () => {},
+    { run: async args => args.join(" ") === "version" ? "gortex v0.64.5" : args.join(" ") === "daemon status" ? READY : reposJson() },
+    { wait: async () => {}, answerWithinMs: 10 },
+  );
+  assert.deepEqual(await diagnostics.start(), { report: null, running: true });
+  assert.deepEqual(await diagnostics.start(), { report: null, running: true });
+  assert.equal(runs, 1, "the second request joined the run in progress");
+  release();
+  await settle(() => !diagnostics.state().running);
+  assert.equal(diagnostics.state().running, false);
+  assert.equal(diagnostics.state().report!.state, "healthy");
+});
+
+test("an unexpected error in background checks is reported as a failed check", async () => {
+  const diagnostics = new GortexDiagnostics(
+    { version: async () => "v", assignments: async () => rows, info: async path => ({ workspace: "w", project: "p", mode: "workspace", members: [{ name: "app", path }] }), reloadConfiguration: async () => {}, rebuildIndex: async () => {}, refreshContexts: async () => {} },
+    new RepositoryAdminLock(), () => {},
+    { run: async args => args.join(" ") === "version" ? "gortex v0.64.5" : args.join(" ") === "daemon status" ? READY : reposJson() },
+    { wait: async () => {}, evidence: { daemonLog: () => { throw new Error("log reader broke"); }, crashLog: async () => null, executableChangedAt: async () => null, worktreeChanges: async () => [] } },
+  );
+  const { report } = await diagnostics.start();
+  assert.equal(report!.state, "broken");
+  assert.deepEqual(report!.checks.map(entry => [entry.id, entry.evidence]), [["checks", "log reader broke"]]);
+});
+
+test("a repair that outlasts a plugin call answers while running, and job() follows it to the verified outcome", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const diagnostics = new GortexDiagnostics(
+    { version: async () => "v", assignments: async () => rows, info: async () => { throw new Error("corpus app has no dedicated graph"); }, reloadConfiguration: async () => { await gate; }, rebuildIndex: async () => {}, refreshContexts: async () => {} },
+    new RepositoryAdminLock(), () => {},
+    { run: async args => args.join(" ") === "version" ? "gortex v0.64.5" : args.join(" ") === "daemon status" ? READY : reposJson() },
+    { wait: async () => {}, answerWithinMs: 10 },
+  );
+  const report = await diagnostics.run();
+  const job = await diagnostics.repair(report.id, "daemon-reload");
+  assert.equal(job.stage, "running"); assert.equal(job.outcome, "running");
+  await assert.rejects(diagnostics.repair(report.id, "daemon-reload"), /Another repair is already running/);
+  release();
+  await settle(() => diagnostics.job(job.id).stage === "done");
+  const done = diagnostics.job(job.id);
+  assert.equal(done.stage, "done"); assert.equal(done.outcome, "unchanged");
+  assert.deepEqual(done.steps, ["Reloaded Gortex configuration."]);
+});
+
 test("a failed repair is reported as failed with the native error", async () => {
   const diagnostics = new GortexDiagnostics(
     { version: async () => "v", assignments: async () => rows, info: async () => { throw new Error("corpus app has no dedicated graph"); }, reloadConfiguration: async () => { throw new Error("reload refused"); }, rebuildIndex: async () => {}, refreshContexts: async () => {} },

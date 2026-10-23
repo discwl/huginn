@@ -35,15 +35,20 @@ repository metadata and exclusions, and explicitly tracking or untracking reposi
   waited out its 60-second limit, worktrees added or removed in the last two hours
   (which Gortex has to discover), and agent chats that were already open when Gortex
   was last updated. Repositories are checked three at a time, and the checks stop
-  asking once a whole batch is refused.
+  asking once a whole batch is refused. Paseo waits 30 seconds for a plugin call, and
+  on a host where Git starts slowly the checks take longer: after 20 seconds they carry
+  on in the background, and the panel shows the report when they finish. Repairs work
+  the same way, so a daemon restart is followed through its re-check.
 - **Startup visibility** (most useful with Gortex 0.64.9, which reports repositories
   as "loading" during startup). While Gortex starts, Host health shows how many
   repositories are loaded and the step running, and the library shows repositories
   still loading, or still refused, as **Loading** instead of unavailable. Diagnostics'
   **Startup** check reports how long the last startup took, when Gortex could answer
-  queries, its longest phases and the slowest repository to load, and warns about a
-  startup longer than five minutes. Requests refused because the daemon just
-  restarted ("session state was reset") are sent again.
+  queries, its longest phases and the slowest repository to load, and warns when
+  Gortex took more than five minutes to answer queries (the work it does afterwards
+  doesn't hold agents up). Requests refused because the daemon just restarted
+  ("session state was reset") are sent again. Host health asks up to three
+  repositories, so one Gortex can't serve yet doesn't make the host unavailable.
 - Diagnostics' **Crashes** check reports a crash or stack dump in the last day, from
   Gortex 0.64.9's `daemon.stderr.log` or from dumps older versions wrote into
   `daemon.log`. **Full reindexes** lists the last hour's full rebuilds of a

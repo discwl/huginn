@@ -46,8 +46,9 @@ export default function contribute(server: PluginServerContext) {
     return { timeZone, locale };
   });
   const nativePicker = new NativeFolderPicker();
-  // While Gortex starts, Host health adds a line from `daemon status` and the startup steps in its log.
-  const warmup = () => readWarmupSummary({ status: () => runProcess("gortex", ["daemon", "status"], homedir(), { timeoutMs: 15_000, maxBytes: 512 * 1024 }), log: socket => evidence.daemonLog(socket) });
+  // While Gortex starts, Host health adds a line from `daemon status` and the startup steps in its log. Host health
+  // can first spend 15 seconds asking three repositories, and Paseo waits 30 for the answer.
+  const warmup = () => readWarmupSummary({ status: () => runProcess("gortex", ["daemon", "status"], homedir(), { timeoutMs: 8_000, maxBytes: 512 * 1024 }), log: socket => evidence.daemonLog(socket) });
   server.handle(hostHealthRpc, ({ retryNow }) => readHostHealth(native, { retryNow, warmup }));
   server.handle(hostSavingsRpc, readHostSavings);
   server.handle(nativePickerCapabilitiesRpc, () => nativePicker.capabilities());
@@ -85,8 +86,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(suggestLatestRpc, async ({ path }) => ({ job: await suggester.latestFor(path) }));
   const evidence = hostEvidence(checkoutActivity);
   const diagnostics = new GortexDiagnostics(native, admin, () => library.close(), undefined, { evidence });
-  server.handle(diagnosticsRunRpc, () => diagnostics.run());
-  server.handle(diagnosticsLatestRpc, () => ({ report: diagnostics.latest() }));
+  server.handle(diagnosticsRunRpc, () => diagnostics.start());
+  server.handle(diagnosticsLatestRpc, () => diagnostics.state());
   server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }) => diagnostics.repair(reportId, remedyId));
   server.handle(diagnosticsRepairJobRpc, ({ id }) => diagnostics.job(id));
   const settingsIo = hostSettingsIo(() => native.assignments());
