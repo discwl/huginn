@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { copyText, Icon } from "@getpaseo/plugin/client/react-native";
+import { copyText, Icon } from "@getpaseo/plugin/client/ui";
 import { inspectorLabels, type InspectorOperation, type InspectorRow, type InspectorSymbol, type SymbolSnapshot } from "../shared/symbol-inspection.ts";
 import type { InspectorLocation } from "../shared/inspector-navigation.ts";
 import { Action, Badge, Disclosure, Notice } from "./controls.tsx";

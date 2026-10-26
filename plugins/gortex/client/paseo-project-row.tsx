@@ -1,5 +1,5 @@
 import { Text, View } from "react-native";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { Repository } from "../shared/models.ts";
 import { Action, Badge, Notice } from "./controls.tsx";

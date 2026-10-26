@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { Catalog, Repository } from "../shared/models.ts";
 import { emptyCatalogFilters, type CatalogFilters } from "../shared/catalog-browser.ts";

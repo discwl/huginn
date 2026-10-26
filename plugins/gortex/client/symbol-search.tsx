@@ -1,32 +1,36 @@
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
+import type { PersistedSymbolSearch } from "../shared/workspace-inspector.ts";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import { searchRpc, symbolRpc } from "../shared/contracts.ts";
 import type { RepositoryContext } from "../shared/models.ts";
 import { emptyNavigation, navigateInspector } from "../shared/inspector-navigation.ts";
 import { Action, Badge, Notice } from "./controls.tsx";
 import { SymbolInspector } from "./symbol-inspector.tsx";
 
-export function SymbolSearch({ theme, host, context, limit }: Pick<PluginSurfaceProps, "theme" | "host"> & { context: RepositoryContext; limit: number }) {
+export function SymbolSearch({ theme, host, context, limit, initialState, onPersist }: Pick<PluginSurfaceProps, "theme" | "host"> & { context: RepositoryContext; limit: number; initialState?: PersistedSymbolSearch; onPersist?: (state: PersistedSymbolSearch) => void }) {
   const search = useRpc(searchRpc), inspect = useRpc(symbolRpc);
-  const [draft, setDraft] = useState(""), [query, setQuery] = useState("");
+  const [draft, setDraft] = useState(initialState?.query ?? ""), [query, setQuery] = useState(initialState?.query.trim() ?? "");
+  const lastQuery = useRef(query), persist = useRef(onPersist);
+  persist.current = onPersist;
   const [cursor, setCursor] = useState<string | null>(null), [previousPages, setPreviousPages] = useState<(string | null)[]>([]);
-  const [navigation, navigate] = useReducer(navigateInspector, emptyNavigation);
+  const [navigation, navigate] = useReducer(navigateInspector, { ...emptyNavigation, current: initialState?.selection ?? null });
+  useEffect(() => { persist.current?.({ query: draft, selection: navigation.current }); }, [draft, navigation.current]);
   const [focused, setFocused] = useState(false), [focusedResult, setFocusedResult] = useState<string | null>(null);
   const [width, setWidth] = useState(0);
   const wide = width >= 820;
   const location = navigation.current, symbolId = location?.symbol.id ?? null, operation = location?.operation ?? "source";
-  useEffect(() => { const timer = setTimeout(() => { setQuery(draft.trim()); setCursor(null); setPreviousPages([]); navigate({ type: "reset" }); }, 300); return () => clearTimeout(timer); }, [draft]);
+  useEffect(() => { if (draft.trim() === lastQuery.current) return; const timer = setTimeout(() => { lastQuery.current = draft.trim(); setQuery(draft.trim()); setCursor(null); setPreviousPages([]); navigate({ type: "reset" }); }, 300); return () => clearTimeout(timer); }, [draft]);
   const results = useQuery({ queryKey: [host.id, "gortex", context.workspaceId, context.repositoryPath, "symbols", query, cursor, limit], queryFn: () => search({ ...context, query, cursor, limit }), enabled: query.length > 0, retry: false, staleTime: 0, refetchOnWindowFocus: false });
-  const snapshot = useQuery({ queryKey: [host.id, "gortex", context.workspaceId, context.repositoryPath, "visual-inspector-v2", symbolId, operation], queryFn: () => inspect({ ...context, symbolId: symbolId!, operation }), enabled: symbolId !== null && draft.trim() === query, retry: false, staleTime: 0, refetchOnWindowFocus: false });
+  const snapshot = useQuery({ queryKey: [host.id, "gortex", context.workspaceId, context.repositoryPath, "visual-inspector-v2", symbolId, operation], queryFn: () => inspect({ ...context, symbolId: symbolId!, operation }), enabled: symbolId !== null && draft.trim() === query && results.isSuccess && !results.isFetching, retry: false, staleTime: 0, refetchOnWindowFocus: false });
   const currentResults = draft.trim() === query && query && !results.isError ? results.data : undefined;
   return <View onLayout={event => setWidth(event.nativeEvent.layout.width)} style={{ gap: 16, minWidth: 0 }}>
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 13, borderWidth: 1, borderRadius: 12, borderColor: focused ? theme.colors.accent : theme.colors.border, backgroundColor: theme.colors.surface0 }}>
         <Icon name="Search" size={18} color={theme.colors.foregroundMuted} />
-        <TextInput accessibilityLabel="Search indexed symbols" value={draft} onChangeText={setDraft} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} placeholder="Find a function, class, type or code concept…" placeholderTextColor={theme.colors.foregroundMuted} autoCapitalize="none" autoCorrect={false} style={{ flex: 1, minWidth: 0, minHeight: 48, paddingVertical: 12, color: theme.colors.foreground, fontSize: 14 }} />
+        <TextInput accessibilityLabel="Search indexed symbols" maxLength={300} value={draft} onChangeText={setDraft} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} placeholder="Find a function, class, type or code concept…" placeholderTextColor={theme.colors.foregroundMuted} autoCapitalize="none" autoCorrect={false} style={{ flex: 1, minWidth: 0, minHeight: 48, paddingVertical: 12, color: theme.colors.foreground, fontSize: 14 }} />
       </View>
       <Notice theme={theme} text={`Search this repository in ${context.workspaceId}. Follow related symbols, then use Back to return.`} />
     </View>

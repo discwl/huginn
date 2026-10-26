@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { suggestJobRpc, suggestLatestRpc, suggestStartRpc, type RuleSuggestion, type SuggestJob } from "../shared/exclusion-suggest-contracts.ts";
 import { Action, Badge, Disclosure, Notice } from "./controls.tsx";

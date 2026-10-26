@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 import { View } from "react-native";
-import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
+import { Icon, Modal } from "@getpaseo/plugin/client/ui";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Notice } from "./controls.tsx";
 import { RepositoryUntrack } from "./repository-untrack.tsx";

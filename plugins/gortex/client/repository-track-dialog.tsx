@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
+import { Icon, Modal } from "@getpaseo/plugin/client/ui";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { trackPreviewRpc, trackApplyRpc, trackJobRpc, observeTrackReadiness, type TrackPreview } from "../shared/track-contracts.ts";
