@@ -18,6 +18,8 @@ export const hostHealthSchema = z.object({
   state: z.enum(["available", "busy", "paused", "unavailable"]),
   health: daemonHealthSchema.nullable(), error: z.string().nullable(),
   pausedUntil: z.string().nullable(),
+  // Gortex's recent refusals of this plugin's requests, when there were any: shown, not acted on, while occasional.
+  refusals: z.object({ answered: z.number().int().nonnegative(), refused: z.number().int().nonnegative(), windowMinutes: z.number().int().positive() }).nullable().default(null),
   // While Gortex starts: "Starting: 3 of 5 repositories loaded · step: … (running 42 s)".
   warmup: z.string().nullable(),
 });

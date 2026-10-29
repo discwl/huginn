@@ -49,7 +49,7 @@ import type { DaemonHealth } from "../shared/health-models.ts";
 
 // Gortex keeps its finished Git check for 5 seconds, so a quick refusal caused by a slow Git start answers on an
 // immediate retry. A slower refusal means Gortex was working on something else, and a retry won't help.
-const QUICK_REFUSAL_MS = 2000, QUICK_RETRY_MS = 400;
+const QUICK_REFUSAL_MS = 2000, QUICK_RETRY_MS = [400, 800];
 
 const isMcpTimeout = (error: unknown) => (error as { code?: unknown } | null)?.code === -32001 || /\brequest timed out\b/i.test(error instanceof Error ? error.message : "");
 // Gortex 0.64.9's proxy answers the first request after a daemon restart with -32097: it wasn't run and can be retried.
@@ -119,6 +119,9 @@ export class GortexClient implements NativePort {
 
   /** Try now: automatic requests are sent again right away. */
   resumeRequests(): void { this.stalls.resume(); }
+
+  /** Gortex's recent answers and refusals to this plugin, shown in Host health. */
+  requestTally(): { answered: number; refused: number; windowMs: number } { return this.stalls.tally(); }
 
   private async acquire(key: string): Promise<Connection> {
     let unlock!: () => void;
@@ -192,7 +195,7 @@ export class GortexClient implements NativePort {
       const until = this.stalls.pausedUntil(key);
       if (until !== null) throw new NativeError("paused", pausedMessage(until - this.now()));
     }
-    let quickRetried = false;
+    let quickRetries = 0;
     for (let attempt = 0; ; attempt++) {
       const started = this.now();
       try {
@@ -226,9 +229,8 @@ export class GortexClient implements NativePort {
           await this.wait(warmupRetryDelaysMs[attempt]);
           continue;
         }
-        if (kind === "stall" && !quickRetried && this.now() - started < QUICK_REFUSAL_MS) {
-          quickRetried = true;
-          await this.wait(QUICK_RETRY_MS);
+        if (kind === "stall" && quickRetries < QUICK_RETRY_MS.length && this.now() - started < QUICK_REFUSAL_MS) {
+          await this.wait(QUICK_RETRY_MS[quickRetries++]);
           continue;
         }
         const pauseMs = this.stalls.refused(key);

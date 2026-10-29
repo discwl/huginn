@@ -74,10 +74,14 @@ export const warmupRetryDelaysMs = [300, 700, 1500, 3000, 6000];
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
 
-/** Gortex refused, or didn't answer, and the plugin paused its automatic requests for `pauseMs`. */
+/**
+ * Gortex refused, or didn't answer. With pauseMs 0 the refusals still look occasional and the next refresh asks
+ * again; otherwise they kept coming and the plugin paused its automatic requests for pauseMs.
+ */
 export function stalledMessage(pauseMs: number, timeoutMs: number | null = null): string {
-  const what = timeoutMs === null ? "Gortex refused this request because it is still discovering checkouts" : `Gortex didn't answer within ${Math.round(timeoutMs / 1000)} seconds`;
-  return `${what}. On some hosts that stays stuck for a long time, and retrying only adds to Gortex's work, so the plugin paused its automatic Gortex requests for about ${minutes(pauseMs)} min. Use Try now in Host health to check sooner, or run Diagnostics.`;
+  const what = timeoutMs === null ? "Gortex refused this request because it was still discovering checkouts" : `Gortex didn't answer within ${Math.round(timeoutMs / 1000)} seconds`;
+  if (pauseMs <= 0) return `${what}. Some hosts do this now and then; the next refresh usually answers.`;
+  return `${what}, and kept refusing, so the plugin paused its automatic Gortex requests for about ${minutes(pauseMs)} min rather than add to its work. Use Try now in Host health to check sooner, or run Diagnostics.`;
 }
 
 /** An automatic request that wasn't sent because of an earlier refusal. */

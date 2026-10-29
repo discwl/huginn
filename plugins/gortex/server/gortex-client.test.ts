@@ -74,21 +74,38 @@ test("a quick refusal gets one immediate retry, and the answer is used", async c
   } finally { await f.native.close(); }
 });
 
-test("refusals on a daemon that has been up a while pause automatic requests instead of retrying them", async context => {
+test("a repository that keeps refusing pauses its automatic requests; occasional refusals don't", async context => {
   const f = stalling(context, () => refused);
   try {
-    await assert.rejects(f.native.info(tmpdir(), { background: true }), (error: { code?: string; message: string }) => error.code === "stalled" && /paused its automatic Gortex requests for about 1 min/.test(error.message));
-    assert.equal(f.calls(), 2, "one try and one quick retry");
+    // Each request is tried, then retried quickly twice inside Gortex's 5-second window.
+    await assert.rejects(f.native.info(tmpdir(), { background: true }), (error: { code?: string; message: string }) => error.code === "stalled" && /next refresh usually answers/.test(error.message));
+    assert.equal(f.calls(), 3); assert.deepEqual(f.waits, [400, 800]);
+    assert.equal(await f.native.pausedUntil(tmpdir()), null, "one refused request is not a reason to pause");
+    await assert.rejects(f.native.info(tmpdir(), { background: true }), /next refresh usually answers/);
+    // The third refused request in a row pauses this repository.
+    await assert.rejects(f.native.info(tmpdir(), { background: true }), /kept refusing, so the plugin paused its automatic Gortex requests for about 1 min/);
+    assert.equal(f.calls(), 9);
     // While paused, an automatic request isn't sent at all.
     await assert.rejects(f.native.info(tmpdir(), { background: true }), (error: { code?: string }) => error.code === "paused");
-    assert.equal(f.calls(), 2);
+    assert.equal(f.calls(), 9);
     // A request the user asked for still tries, and a further refusal doubles the pause.
     await assert.rejects(f.native.query(tmpdir(), "search", { query: "x" }), /about 2 min/);
-    assert.equal(f.calls(), 4);
-    // Try now: automatic requests are sent again.
+    assert.equal(f.calls(), 12);
+    // Try now: automatic requests are sent again, and the count starts over.
     f.native.resumeRequests();
-    await assert.rejects(f.native.info(tmpdir(), { background: true }), /about 1 min/);
-    assert.equal(f.calls(), 6);
+    await assert.rejects(f.native.info(tmpdir(), { background: true }), /next refresh usually answers/);
+    assert.equal(f.calls(), 15);
+    assert.deepEqual(f.native.requestTally(), { answered: 0, refused: 5, windowMs: 600_000 });
+  } finally { await f.native.close(); }
+});
+
+test("an answer between refusals keeps a flaky repository from ever pausing", async context => {
+  // Every request is refused on its first try and answered on the quick retry, the pattern seen on slow-Git hosts;
+  // and every other request is refused outright.
+  const f = stalling(context, call => call % 2 === 1 ? refused : call % 4 === 0 ? refused : { structuredContent: info, content: [] });
+  try {
+    for (let i = 0; i < 8; i++) await f.native.info(tmpdir(), { background: true }).catch(() => null);
+    assert.equal(await f.native.pausedUntil(tmpdir()), null);
   } finally { await f.native.close(); }
 });
 
@@ -149,11 +166,14 @@ test("a busy dispatcher sent as a JSON-RPC error is retried, and transport failu
   assert.equal(gortexRefusal(new McpError(-32000, "repository loading: x (scan, 5%)")), "repository loading: x (scan, 5%)");
 });
 
-test("a request Gortex doesn't answer in time is reported as such and pauses, instead of blaming the daemon's reachability", async context => {
+test("a request Gortex doesn't answer in time is reported as such, and pauses once that keeps happening", async context => {
   const f = stalling(context, () => { throw new McpError(ErrorCode.RequestTimeout, "Request timed out"); });
   try {
     await assert.rejects(f.native.info(tmpdir()), (error: { code?: string; message: string }) => error.code === "timeout" && /didn't answer within 20 seconds/.test(error.message) && !/reachable/.test(error.message));
-    assert.equal(f.calls(), 1);
+    assert.equal(f.calls(), 1, "a timeout already waited; it isn't retried");
+    assert.equal(await f.native.pausedUntil(tmpdir()), null);
+    await assert.rejects(f.native.info(tmpdir()), (error: { code?: string }) => error.code === "timeout");
+    await assert.rejects(f.native.info(tmpdir()), /didn't answer within 20 seconds, and kept refusing/);
     assert.notEqual(await f.native.pausedUntil(tmpdir()), null);
   } finally { await f.native.close(); }
 });
@@ -164,9 +184,10 @@ test("readiness checks try once, are never paused, and never pause other request
     await assert.rejects(f.native.info(tmpdir(), { single: true }), /Gortex rejected the request/);
     assert.equal(f.calls(), 1);
     assert.equal(await f.native.pausedUntil(tmpdir()), null);
-    await assert.rejects(f.native.info(tmpdir(), { background: true }), (error: { code?: string }) => error.code === "stalled");
+    for (let i = 0; i < 3; i++) await assert.rejects(f.native.info(tmpdir(), { background: true }), (error: { code?: string }) => error.code === "stalled");
+    assert.notEqual(await f.native.pausedUntil(tmpdir()), null, "three refused requests in a row paused the repository");
     await assert.rejects(f.native.info(tmpdir(), { single: true }), /Gortex rejected the request/);
-    assert.equal(f.calls(), 4, "a readiness check is sent even while automatic requests are paused");
+    assert.equal(f.calls(), 11, "a readiness check is sent even while automatic requests are paused");
   } finally { await f.native.close(); }
 });
 

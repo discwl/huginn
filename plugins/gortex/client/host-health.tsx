@@ -67,6 +67,7 @@ export function HostHealth({ host, theme, compact = false, onDetails }: Props & 
     {report.error && <Notice theme={theme} error text={`Health unavailable: ${report.error.message}`} />}
     {report.data?.error && <Notice theme={theme} error={!busy} text={report.data.error} />}
     {retry.error && <Notice theme={theme} error text={retry.error.message} />}
+    {report.data?.refusals && <Notice theme={theme} text={`Gortex refused ${report.data.refusals.refused} of the last ${report.data.refusals.answered + report.data.refusals.refused} requests from this plugin (past ${report.data.refusals.windowMinutes} min). Occasional refusals are normal on some hosts and are retried; automatic requests pause only if they keep coming.`} />}
     {health && <>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
         <Metric theme={theme} icon="Network" label="Graph nodes" value={health.graph_nodes.toLocaleString()} detail={`${health.tracked_repos} tracked ${health.tracked_repos === 1 ? "repository" : "repositories"}`} />

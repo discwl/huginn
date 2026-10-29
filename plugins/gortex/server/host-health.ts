@@ -7,6 +7,7 @@ type HealthPort = {
   daemonHealth(path: string, options?: { background?: boolean }): Promise<DaemonHealth>;
   pausedUntil?(path: string): Promise<number | null>;
   resumeRequests?(): void;
+  requestTally?(): { answered: number; refused: number; windowMs: number };
 };
 
 function isTransient(error: unknown): boolean {
@@ -28,6 +29,12 @@ function healthError(error: unknown): string {
  * every pause first. warmup, read only when Gortex isn't ready or refused, describes a startup in progress.
  */
 export async function readHostHealth(native: HealthPort, options: { retryNow?: boolean; now?: () => number; warmup?: () => Promise<string | null> } = {}) {
+  const report = await readSnapshot(native, options);
+  const tally = native.requestTally?.() ?? null;
+  return { ...report, refusals: tally && tally.refused > 0 ? { answered: tally.answered, refused: tally.refused, windowMinutes: Math.max(1, Math.round(tally.windowMs / 60_000)) } : null };
+}
+
+async function readSnapshot(native: HealthPort, options: { retryNow?: boolean; now?: () => number; warmup?: () => Promise<string | null> }) {
   const now = options.now ?? Date.now;
   const base = { scope: "host" as const, observedAt: new Date(now()).toISOString() };
   const warmup = () => options.warmup ? options.warmup().catch(() => null) : Promise.resolve(null);
