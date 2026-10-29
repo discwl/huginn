@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isBusyMessage, isStallMessage, isWarmingUpMessage, warmingUpMessage, warmupRetryDelaysMs } from "../shared/native-retry.ts";
+import { isBusyMessage, isLoadingMessage, isNotLoadedMessage, isStallMessage, isWarmingUpMessage, loadingMessage, warmingUpMessage, warmupRetryDelaysMs } from "../shared/native-retry.ts";
 import { NativeError } from "./native-response.ts";
 import { WorkspaceLibrary } from "./workspace-library.ts";
 import { readHostHealth } from "./host-health.ts";
@@ -8,6 +8,30 @@ import type { NativePort } from "./gortex-client.ts";
 import type { NativeAssignment } from "../shared/models.ts";
 
 const warmup = "Gortex rejected the request. Gortex said: view_building: automatic checkout discovery is still pending; retry this request: indexer: checkout mutation lane is busy; retry: selected checkout discovery is pending: context deadline exceeded";
+
+test("Gortex 0.64.11's repository loading is its own case, with readable progress", () => {
+  const text = "repository loading: huginn (resolving references, 37%)";
+  assert.equal(isLoadingMessage(text), true); assert.equal(isNotLoadedMessage(text), true);
+  assert.equal(isStallMessage(text), false, "loading is progress, not a checkout stall");
+  assert.equal(loadingMessage(text), "Gortex is still loading huginn after a restart (resolving references, 37%). It answers once loading finishes; refresh in a moment.");
+  assert.match(loadingMessage("repository loading: weird"), /still loading this repository after a restart\. /);
+  assert.equal(isLoadingMessage(loadingMessage(text)), true, "the plain-words form is still recognized downstream");
+});
+
+test("a repository Gortex reports loading is shown as loading with its progress, even without a detected startup", async () => {
+  const rows: NativeAssignment[] = [{ repo: "app", path: process.cwd(), workspace: "w", project: "p", source: "global" }];
+  const native: NativePort = {
+    assignments: async () => rows, version: async () => "gortex v0.64.11+fixture", close: async () => {},
+    info: async () => { throw new Error("repository loading: app (resolving references, 37%)"); },
+    query: async () => { throw new Error("No graph query expected"); },
+  };
+  const library = new WorkspaceLibrary(native);
+  try {
+    const [row] = (await library.catalog()).repositories;
+    assert.equal(row.state, "loading");
+    assert.match(row.error!, /still loading app after a restart \(resolving references, 37%\)/);
+  } finally { library.close(); }
+});
 
 test("Gortex's own retry conditions are recognized; ordinary failures are not", () => {
   for (const text of [warmup, "indexer: checkout mutation lane is busy", "daemon is warming up"]) assert.equal(isWarmingUpMessage(text), true, text);

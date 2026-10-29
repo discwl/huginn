@@ -12,6 +12,8 @@ export interface DaemonStatus {
   socket: string | null;
   sessions: DaemonSession[];
   repos: DaemonRepo[];
+  /** Gortex 0.64.11: a newer binary is on disk than the one the daemon is running ("binary  stale — …"). */
+  staleBinary: boolean;
 }
 
 /** The "tracked repos:" table, read by its header names; the trailing "other" row and footers have no path. */
@@ -64,6 +66,7 @@ export function parseDaemonStatus(text: string): DaemonStatus {
     warming: state !== null && /warming up/.test(state),
     version: field(text, "daemon"), pid: pid !== null && /^\d+$/.test(pid) ? Number(pid) : null,
     uptime: field(text, "uptime"), state, socket: field(text, "socket"), sessions, repos: parseRepos(text),
+    staleBinary: /^stale\b/i.test(field(text, "binary") ?? ""),
   };
 }
 

@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { homedir } from "node:os";
 import { requireNativeCompatibility, requireTrackCliSupport } from "../shared/native-compatibility.ts";
-import { isBusyMessage, isRestartMessage, isStallMessage, pausedMessage, stalledMessage, warmupRetryDelaysMs, warmupWindowSeconds } from "../shared/native-retry.ts";
+import { isBusyMessage, isLoadingMessage, isRestartMessage, isStallMessage, loadingMessage, pausedMessage, stalledMessage, warmupRetryDelaysMs, warmupWindowSeconds } from "../shared/native-retry.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
@@ -56,11 +56,25 @@ const isMcpTimeout = (error: unknown) => (error as { code?: unknown } | null)?.c
 const isSessionReset = (error: unknown) => (error as { code?: unknown } | null)?.code === -32097 || isRestartMessage(error instanceof Error ? error.message : "");
 const sessionResetMessage = "Gortex's daemon restarted, so this request wasn't run.";
 
+/**
+ * Gortex's own refusal, sent as a JSON-RPC error rather than a tool result (repository loading, dispatcher busy, a
+ * checkout stall, an unavailable repository). The daemon answered, so the connection is healthy and the text is the
+ * diagnosis: it is kept instead of being reported as an unreachable daemon. Null for transport failures.
+ */
+export function gortexRefusal(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code !== "number" || !(error instanceof Error)) return null;
+  const text = error.message.replace(/^MCP error -?\d+:\s*/i, "").trim();
+  if (!text || /\bconnection closed\b/i.test(text)) return null;
+  return isLoadingMessage(text) || isBusyMessage(error.message) || isStallMessage(text) || /\brepository unavailable\b/i.test(text) ? text : null;
+}
+
 /** Which kind of refusal an error is, or null for an ordinary failure. */
-function refusal(error: unknown): "busy" | "reset" | "stall" | "timeout" | null {
+function refusal(error: unknown): "busy" | "reset" | "loading" | "stall" | "timeout" | null {
   const text = error instanceof Error ? error.message : "";
   const code = (error as { code?: unknown } | null)?.code;
   if (isBusyMessage(text)) return "busy";
+  if (isLoadingMessage(text)) return "loading";
   if (code === "session_reset" || isRestartMessage(text)) return "reset";
   if (code === "timeout" || code === "health_timeout") return "timeout";
   return isStallMessage(text) ? "stall" : null;
@@ -200,6 +214,12 @@ export class GortexClient implements NativePort {
           await this.wait(warmupRetryDelaysMs[attempt]);
           continue;
         }
+        // Loading after a restart is progress, not a stall: wait it out on the startup schedule, and never pause for it.
+        if (kind === "loading") {
+          if (options.single || !scheduled) throw new NativeError("repo_loading", loadingMessage(error instanceof Error ? error.message : ""));
+          await this.wait(warmupRetryDelaysMs[attempt]);
+          continue;
+        }
         if (options.single) throw error;
         if (kind === "stall" && await this.warmingUp()) {
           if (!scheduled) throw error;
@@ -238,6 +258,8 @@ export class GortexClient implements NativePort {
       }
       result = await connection.client.callTool({ name, arguments: args }, undefined, { timeout });
     } catch (error) {
+      const refused = error instanceof NativeError || isSessionReset(error) || isMcpTimeout(error) ? null : gortexRefusal(error);
+      if (refused !== null) throw new NativeError(isLoadingMessage(refused) ? "repo_loading" : "refused", refused);
       if (this.connections.get(key) === connection) this.connections.delete(key);
       await connection.client.close().catch(() => {});
       if (error instanceof NativeError) throw error;

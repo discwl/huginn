@@ -1,5 +1,5 @@
 import type { DaemonHealth } from "../shared/health-models.ts";
-import { busyMessage, isBusyMessage, isWarmingUpMessage, pausedMessage, startingMessage, warmingUpMessage } from "../shared/native-retry.ts";
+import { busyMessage, isBusyMessage, isLoadingMessage, isWarmingUpMessage, loadingMessage, pausedMessage, startingMessage, warmingUpMessage } from "../shared/native-retry.ts";
 import { isWaiting } from "./native-response.ts";
 
 type HealthPort = {
@@ -18,6 +18,7 @@ function healthError(error: unknown): string {
   const text = error instanceof Error ? error.message : "Gortex health is unavailable.";
   if (isWaiting(error)) return text;
   if (isBusyMessage(text)) return busyMessage;
+  if (isLoadingMessage(text)) return loadingMessage(text);
   return isWarmingUpMessage(text) ? warmingUpMessage : text;
 }
 

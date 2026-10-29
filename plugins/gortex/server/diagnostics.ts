@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../shared/diagnostics-contracts.ts";
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
-import { busyMessage, isBusyMessage, isWarmingUpMessage, warmupWindowSeconds } from "../shared/native-retry.ts";
+import { busyMessage, isBusyMessage, isLoadingMessage, isWarmingUpMessage, loadingMessage, warmupWindowSeconds } from "../shared/native-retry.ts";
 import { parseDaemonStatus, summarizeSessions, uptimeSeconds, type DaemonSession, type DaemonStatus } from "./daemon-status.ts";
 import { requestTimeouts, type DiagnosticsEvidence, type WorktreeChange } from "./diagnostics-evidence.ts";
 import { fullIndexes, lastCrash, readySeconds, stepLabel, triggerLabel, warmupTimeline } from "./warmup.ts";
@@ -155,7 +155,7 @@ export class GortexDiagnostics {
       try { await (this.native.infoOnce?.(row.path) ?? this.native.info(row.path)); return { ok: true, row, attempts: attempt }; }
       catch (error) {
         text = message(error);
-        if (!isWarmingUpMessage(text) || isBusyMessage(text) || attempt === PROBE_ATTEMPTS) break;
+        if (!isWarmingUpMessage(text) || isBusyMessage(text) || isLoadingMessage(text) || attempt === PROBE_ATTEMPTS) break;
         await this.wait(PROBE_RETRY_MS);
       }
     }
@@ -202,12 +202,19 @@ export class GortexDiagnostics {
       daemonStatus = parsed;
       daemonRunning = parsed.running; daemonReady = parsed.ready; sessions = parsed.sessions; uptime = uptimeSeconds(parsed.uptime); socket = parsed.socket;
       const warming = parsed.warming;
-      const state = daemonReady ? "pass" : daemonRunning ? "warn" : "fail";
+      // Gortex 0.64.11 reports "degraded — …; queryable": it answers, but something is wrong worth showing.
+      const degraded = daemonReady && /^degraded\b/i.test(parsed.state ?? "");
+      const state = degraded ? "warn" : daemonReady ? "pass" : daemonRunning ? "warn" : "fail";
       checks.push({
         id: "daemon", title: "Daemon", state,
-        detail: daemonReady ? `Ready. ${trim(/ sessions\s+(\d+)/.exec(status)?.[0] ?? "", 60)}`.trim() : warming ? "Running but still warming up; queries can be refused until it finishes." : daemonRunning ? "Running, but not reporting a ready state." : "Not running on this host.",
+        detail: degraded ? `Answering queries, but Gortex reports itself degraded: ${trim(parsed.state ?? "", 160)}.`
+          : daemonReady ? `Ready. ${trim(/ sessions\s+(\d+)/.exec(status)?.[0] ?? "", 60)}`.trim() : warming ? "Running but still warming up; queries can be refused until it finishes." : daemonRunning ? "Running, but not reporting a ready state." : "Not running on this host.",
         evidence: trim(status.split(/\r?\n/).filter(line => /^\s*(pid|uptime|state|sessions)\s+\S/.test(line)).map(line => line.trim()).join(" · "), 300),
       });
+      if (parsed.staleBinary) {
+        checks.push({ id: "binary", title: "Gortex version in use", state: "warn", detail: "A newer Gortex is installed than the one the daemon is running, usually after an update. Restart the daemon to use it.", evidence: trim(status.split(/\r?\n/).find(line => /^\s*binary\s+\S/.test(line))?.trim() ?? "", 200) || null });
+        add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart so it runs the installed version. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
+      }
       if (!daemonRunning) add({ id: "daemon-start", title: "Start the Gortex daemon", detail: "Runs gortex daemon start on this host.", risk: "safe", target: null });
       else if (!daemonReady) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again; warm-up usually clears on its own.", risk: "safe", target: null });
     } catch (error) {
@@ -294,6 +301,7 @@ export class GortexDiagnostics {
         if (result.ok) { if (result.attempts > 1) retried.push(result.row.repo); continue; }
         const { row, text } = result;
         if (isBusyMessage(text)) { busy = true; failures.push(`${row.repo}: refused, dispatcher busy`); }
+        else if (isLoadingMessage(text)) { warming = true; startupFailures++; refused++; failures.push(`${row.repo}: ${trim(loadingMessage(text), 160)}`); }
         else if (isWarmingUpMessage(text)) { warming = true; discoveryFailures++; refused++; failures.push(`${row.repo}: checkout discovery pending`); }
         else if (starting || loadingPaths.has(repositoryPathKey(row.path))) { warming = true; startupFailures++; refused++; failures.push(`${row.repo}: ${trim(text, 120)}`); }
         else failures.push(`${row.repo}: ${trim(text, 120)}`);

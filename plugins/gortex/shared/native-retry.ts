@@ -18,10 +18,25 @@ const resetPatterns = [/\bdaemon restarted\b/i, /\bsession state was reset\b/i, 
 
 // While Gortex starts, it answers "repository not tracked" for a repository it hasn't loaded yet (0.64.10, 2026-10-23).
 const notLoadedPatterns = [/\brepository not tracked\b/i];
+// Gortex 0.64.11 says so outright, as a retryable -32000: "repository loading: <repo> (<phase>, <percent>%)".
+const loadingPatterns = [/\brepository loading\b/i, /\bstill loading\b/i];
+
+/** Gortex is loading this repository after a restart. Unlike "not tracked", this needs no daemon state to interpret. */
+export function isLoadingMessage(message: string): boolean {
+  return loadingPatterns.some(pattern => pattern.test(message));
+}
 
 /** Gortex doesn't know this repository yet. Only the daemon's state tells a startup from a repository it doesn't track. */
 export function isNotLoadedMessage(message: string): boolean {
-  return notLoadedPatterns.some(pattern => pattern.test(message));
+  return isLoadingMessage(message) || notLoadedPatterns.some(pattern => pattern.test(message));
+}
+
+/** Gortex's loading refusal in plain words, keeping its progress when it gave any. */
+export function loadingMessage(message: string): string {
+  const match = /repository loading:\s*(.+?)\s*\(([^,()]+),\s*(\d{1,3})%\)/i.exec(message);
+  const progress = match ? ` (${match[2].trim()}, ${match[3]}%)` : "";
+  const what = match ? match[1].trim() : "this repository";
+  return `Gortex is still loading ${what} after a restart${progress}. It answers once loading finishes; refresh in a moment.`;
 }
 
 export function isBusyMessage(message: string): boolean {
@@ -35,12 +50,12 @@ export function isRestartMessage(message: string): boolean {
 
 /** Gortex is still discovering a checkout (not out of request slots, and not a restart). */
 export function isStallMessage(message: string): boolean {
-  return !isBusyMessage(message) && !isRestartMessage(message) && stallPatterns.some(pattern => pattern.test(message));
+  return !isBusyMessage(message) && !isRestartMessage(message) && !isLoadingMessage(message) && stallPatterns.some(pattern => pattern.test(message));
 }
 
 /** Any of these: Gortex is running, but didn't serve this request. */
 export function isWarmingUpMessage(message: string): boolean {
-  return isBusyMessage(message) || isRestartMessage(message) || stallPatterns.some(pattern => pattern.test(message));
+  return isBusyMessage(message) || isRestartMessage(message) || isLoadingMessage(message) || stallPatterns.some(pattern => pattern.test(message));
 }
 
 export const busyMessage = "Gortex is handling as many requests as it allows at once (8 by default), so this one was refused. It usually clears in a moment; close idle agent sessions, or raise GORTEX_MCP_MAX_CONCURRENT_DISPATCHES on this host.";

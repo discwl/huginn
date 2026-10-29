@@ -84,6 +84,31 @@ test("an unindexed repository is a problem with a re-index offer; a stale one is
   assert.equal(check(await stale.diagnostics.run(), "index").state, "warn");
 });
 
+test("repositories still loading after a restart are part of the startup: no stuck verdict, no restart", async () => {
+  const status = " pid 26804\n uptime    5d23h\n state     ready (warmup 21s)\n sessions  3\n";
+  const f = fixture({ status, info: () => { throw new Error("MCP error -32000: repository loading: app (resolving references, 37%)"); } });
+  const report = await f.diagnostics.run();
+  const repositories = check(report, "repositories");
+  assert.equal(repositories.state, "warn");
+  assert.match(repositories.detail, /still starting/);
+  assert.match(repositories.evidence!, /still loading app after a restart \(resolving references, 37%\)/);
+  assert.ok(!report.remedies.some(remedy => remedy.id === "daemon-restart"));
+});
+
+test("a stale binary and a degraded-but-queryable daemon are warnings, and only the stale binary offers a restart", async () => {
+  const stale = fixture({ status: " pid 1\n binary    stale — on-disk image newer than running image; run 'gortex daemon restart'\n uptime    2h\n state     ready (warmup 21s)\n" });
+  const staleReport = await stale.diagnostics.run();
+  assert.equal(check(staleReport, "binary").state, "warn");
+  assert.match(check(staleReport, "binary").evidence!, /on-disk image newer/);
+  assert.ok(staleReport.remedies.some(remedy => remedy.id === "daemon-restart" && remedy.risk === "host-wide"));
+  const degraded = fixture({ status: " pid 1\n uptime    2h\n state     degraded — 3 failed files (1 unreadable); queryable\n" });
+  const degradedReport = await degraded.diagnostics.run();
+  assert.equal(check(degradedReport, "daemon").state, "warn");
+  assert.match(check(degradedReport, "daemon").detail, /Answering queries, but Gortex reports itself degraded: degraded — 3 failed files/);
+  assert.ok(!degradedReport.remedies.some(remedy => remedy.id === "daemon-restart"));
+  assert.equal(degradedReport.checks.find(entry => entry.id === "binary"), undefined);
+});
+
 test("a busy dispatcher is a capacity warning, not a broken host", async () => {
   const f = fixture({ info: () => { throw new Error("MCP error -32002: MCP dispatcher is busy"); } });
   const report = await f.diagnostics.run();

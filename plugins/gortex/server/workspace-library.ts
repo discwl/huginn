@@ -2,7 +2,7 @@ import { lstat, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
-import { busyMessage, isBusyMessage, isNotLoadedMessage, isWarmingUpMessage, warmingUpMessage } from "../shared/native-retry.ts";
+import { busyMessage, isBusyMessage, isLoadingMessage, isNotLoadedMessage, isWarmingUpMessage, loadingMessage, warmingUpMessage } from "../shared/native-retry.ts";
 import { symbolSchema, type Catalog, type Inspection, type NativeAssignment, type Repository, type RepositoryContext, type SearchPage } from "../shared/models.ts";
 import type { NativePort, RequestOptions } from "./gortex-client.ts";
 import { isWaiting, NativeError } from "./native-response.ts";
@@ -20,6 +20,7 @@ function message(error: unknown): string {
   const text = error instanceof Error ? error.message : "Host operation failed.";
   // Warm-up conditions are a wait, not a broken repository; the raw native text reads like a failure.
   if (isBusyMessage(text)) return busyMessage;
+  if (isLoadingMessage(text)) return loadingMessage(text);
   return isWarmingUpMessage(text) ? warmingUpMessage : text;
 }
 
@@ -55,6 +56,7 @@ export class WorkspaceLibrary {
       return repository;
     } catch (error) {
       const text = message(error);
+      if (isLoadingMessage(text)) return this.loadingRow(row, text);
       if (starting && (text === warmingUpMessage || isWaiting(error) || isNotLoadedMessage(text))) return this.loadingRow(row);
       if (text === warmingUpMessage || text === busyMessage || isWaiting(error)) {
         // A verified identity from this session stays usable while discovery catches up.
@@ -66,10 +68,10 @@ export class WorkspaceLibrary {
   }
 
   /** A repository Gortex is still loading after a start: shown as loading, without asking Gortex about it. */
-  private loadingRow(row: NativeAssignment): Repository {
+  private loadingRow(row: NativeAssignment, progress: string | null = null): Repository {
     const previous = this.resolved.get(repositoryPathKey(row.path));
     const base = previous ?? { name: row.repo, path: row.path, declaredWorkspace: row.workspace, declaredProject: row.project, assignmentSource: row.source, workspaceId: null, projectId: null, graphName: null };
-    return { ...base, state: "loading", error: "Gortex is still loading this repository after starting. It's available in a moment." };
+    return { ...base, state: "loading", error: progress ?? "Gortex is still loading this repository after starting. It's available in a moment." };
   }
 
   async catalog(offset = 0, options: Partial<CatalogInput> = {}): Promise<Catalog> {

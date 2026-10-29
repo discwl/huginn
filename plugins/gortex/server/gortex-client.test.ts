@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { GortexClient } from "./gortex-client.ts";
+import { GortexClient, gortexRefusal } from "./gortex-client.ts";
 
 const info = { workspace: "fixture", project: "fixture", mode: "workspace", members: [] };
 
@@ -108,6 +108,45 @@ test("while the daemon warms up after a start, refusals are waited out and never
     assert.deepEqual(f.waits, [300, 700, 1500]);
     assert.equal(await f.native.pausedUntil(tmpdir()), null);
   } finally { await f.native.close(); }
+});
+
+const loading = () => { throw new McpError(-32000, "repository loading: huginn (resolving references, 37%)", { retryable: true }); };
+
+test("repository loading (Gortex 0.64.11) is waited out on the startup schedule and never pauses, even on an old daemon", async context => {
+  const f = stalling(context, call => call <= 3 ? loading() : { structuredContent: info, content: [] });
+  try {
+    assert.deepEqual(await f.native.info(tmpdir(), { background: true }), info);
+    assert.deepEqual(f.waits, [300, 700, 1500]);
+    assert.equal(await f.native.pausedUntil(tmpdir()), null);
+  } finally { await f.native.close(); }
+});
+
+test("loading that outlasts the schedule ends with Gortex's progress, not a pause or an unreachable daemon", async context => {
+  const f = stalling(context, () => loading());
+  try {
+    await assert.rejects(f.native.info(tmpdir()), (error: { code?: string; message: string }) =>
+      error.code === "repo_loading" && /still loading huginn after a restart \(resolving references, 37%\)/.test(error.message) && !/reachable/.test(error.message));
+    assert.equal(await f.native.pausedUntil(tmpdir()), null);
+  } finally { await f.native.close(); }
+});
+
+test("Gortex's own JSON-RPC refusal keeps its text and the healthy connection", async context => {
+  const f = stalling(context, () => { throw new McpError(-32000, "repository unavailable: huginn (root moved)", { retryable: false }); });
+  const closes = context.mock.method(Client.prototype, "close", async () => {});
+  try {
+    await assert.rejects(f.native.info(tmpdir()), (error: { code?: string; message: string }) => error.code === "refused" && error.message === "repository unavailable: huginn (root moved)");
+    assert.equal(closes.mock.callCount(), 0, "the daemon answered, so the connection stays");
+  } finally { await f.native.close(); }
+});
+
+test("a busy dispatcher sent as a JSON-RPC error is retried, and transport failures still read as unreachable", async context => {
+  const busy = stalling(context, call => { if (call <= 2) throw new McpError(-32002, "MCP dispatcher is busy", { retryable: true }); return { structuredContent: info, content: [] }; });
+  try { assert.deepEqual(await busy.native.info(tmpdir()), info); assert.deepEqual(busy.waits, [300, 700]); }
+  finally { await busy.native.close(); }
+  assert.equal(gortexRefusal(new McpError(ErrorCode.ConnectionClosed, "Connection closed")), null);
+  assert.equal(gortexRefusal(new McpError(-32603, "request dispatch failed")), null);
+  assert.equal(gortexRefusal(new Error("repository loading: x (a, 1%)")), null, "only protocol errors carry a code");
+  assert.equal(gortexRefusal(new McpError(-32000, "repository loading: x (scan, 5%)")), "repository loading: x (scan, 5%)");
 });
 
 test("a request Gortex doesn't answer in time is reported as such and pauses, instead of blaming the daemon's reachability", async context => {
