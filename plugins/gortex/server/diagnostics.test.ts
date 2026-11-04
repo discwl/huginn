@@ -118,11 +118,12 @@ test("a busy dispatcher is a capacity warning, not a broken host", async () => {
   assert.deepEqual(report.remedies.map(remedy => remedy.id), ["recheck"]);
 });
 
-test("a busy dispatcher names who is connected and the Paseo restart that has cleared it", async () => {
+test("a busy dispatcher names connected clients and calls for evidence before retrying", async () => {
   const status = `${READY}\nMCP sessions:\n│ id │ client │ version │ connected │ cwd │\n│ a1 │ claude-code │ 2.1 │ 3m │ C:\\Repos\\app │\n│ a2 │ claude-code │ 2.1 │ 9m │ C:\\Repos\\api │\n│ a3 │ paseo-gortex │ 0.1.0 │ 1h │ C:\\Repos\\app │\n`;
   const f = fixture({ status, info: () => { throw new Error("MCP error -32002: MCP dispatcher is busy"); } });
   const capacity = check(await f.diagnostics.run(), "capacity");
-  assert.match(capacity.detail, /Restarting Paseo/);
+  assert.match(capacity.detail, /Inspect recent timeouts and build progress/);
+  assert.doesNotMatch(capacity.detail, /Restarting Paseo/);
   assert.equal(capacity.evidence, "3 connected: 2 claude-code, 1 paseo-gortex");
 });
 
@@ -143,7 +144,7 @@ test("stale worktree records are a warning with a prune offer that runs git work
   );
   const report = await diagnostics.run();
   assert.equal(report.state, "degraded");
-  assert.equal(check(report, "worktrees").evidence, "app: 1");
+  assert.equal(check(report, "worktrees").evidence, "app: 1 prunable");
   const remedy = report.remedies.find(entry => entry.id === "prune:C:/Repos/app")!;
   assert.equal(remedy.risk, "safe");
   const job = await diagnostics.repair(report.id, remedy.id);
@@ -176,7 +177,8 @@ test("slow Git explains the refusals: no stuck verdict and no restart is offered
   );
   const report = await diagnostics.run();
   assert.equal(check(report, "git").state, "warn");
-  assert.match(check(report, "git").detail, /about 600 ms.*Restarting Gortex does not help/);
+  assert.match(check(report, "git").detail, /about 600 ms.*can contribute/);
+  assert.match(check(report, "git").detail, /does not prove a failure/);
   assert.equal(check(report, "repositories").state, "warn");
   assert.ok(!report.remedies.some(remedy => remedy.id === "daemon-restart"), "a restart cannot fix a slow host");
   assert.ok(report.remedies.some(remedy => remedy.id === "recheck"));
@@ -215,11 +217,12 @@ test("repositories that fail for another reason offer reload and a host-wide res
   assert.equal(report.remedies.find(remedy => remedy.id === "daemon-restart")!.risk, "host-wide");
 });
 
-test("no MCP answer stops the run and offers a restart", async () => {
+test("no MCP answer retains the failure and offers a re-check", async () => {
   const f = fixture({ assignments: new Error("Gortex MCP request failed.") });
   const report = await f.diagnostics.run();
   assert.equal(check(report, "mcp").state, "fail");
-  assert.deepEqual(report.remedies.map(remedy => remedy.id), ["daemon-restart"]);
+  assert.equal(check(report, "mcp").evidence, "Gortex MCP request failed.");
+  assert.deepEqual(report.remedies.map(remedy => remedy.id), ["recheck"]);
   assert.ok(!report.checks.some(entry => entry.id === "repositories"));
 });
 

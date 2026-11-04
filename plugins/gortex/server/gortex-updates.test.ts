@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { GortexUpdates, compareVersions, parseInstalledVersion, readLatestRelease, scoopAppFolder, scoopBlockers, verifiedWindowsArchive, replaceWindowsBinary, type UpdatePort } from "./gortex-updates.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { GortexClient } from "./gortex-client.ts";
+import { fakeChats } from "./chats-fixture.ts";
 
 function fixture() {
   let version = "v0.64.3+old", fingerprint = "first", latest = "v0.64.4";
@@ -77,6 +78,30 @@ test("approved update is idempotent, pauses only for installation and refreshes 
   assert.equal(f.service.job()?.id, result.id);
   assert.equal(f.service.apply(preview.id).id, result.id);
   await f.service.close();
+});
+
+test("after a verified update, idle agent chats reopen with the new Gortex and busy ones are listed", async () => {
+  const f = fixture(), chats = fakeChats([{ id: "a1", title: "Fix login" }, { id: "b2", title: "Release notes", status: "running" }]);
+  const result = await done(f.service, f.service.apply((await f.service.preview()).id, chats.paseo).id);
+  assert.equal(result.outcome, "updated");
+  assert.deepEqual(chats.reloaded, ["a1"]);
+  assert.deepEqual(result.chats, { reopened: ["Fix login"], busy: ["Release notes"], failed: [], summary: "Reopened 1 idle chat so it uses the current Gortex tools. 1 busy chat keeps the previous Gortex tools until it's restarted: Release notes." });
+  await f.service.close();
+});
+
+test("chats aren't reopened after an update that needs attention, nor by a Paseo that can't reopen them", async () => {
+  const unverified = fixture(), chats = fakeChats([{ id: "a1" }]);
+  unverified.outcome("restart-failed");
+  const failed = await done(unverified.service, unverified.service.apply((await unverified.service.preview()).id, chats.paseo).id);
+  assert.equal(failed.outcome, "needs-attention");
+  assert.equal(failed.chats, null);
+  assert.deepEqual(chats.reloaded, []);
+  await unverified.service.close();
+  const older = fixture();
+  const result = await done(older.service, older.service.apply((await older.service.preview()).id, fakeChats([{ id: "a1" }], { reload: false }).paseo).id);
+  assert.equal(result.outcome, "updated");
+  assert.equal(result.chats, null, "Paseo 0.13: the panel asks for a restart instead");
+  await older.service.close();
 });
 
 test("changed installation and changes during download reject the approval before any live effect", async () => {

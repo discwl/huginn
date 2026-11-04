@@ -117,8 +117,18 @@ Updating Gortex may make version-gated plugin features unavailable until their
 contracts are verified. Updating this plugin itself remains a separate Paseo action:
 `paseo plugin update gortex --check`, then `--yes`, for GitHub installations.
 
-Agent chats that are already open keep the previous Gortex tools until they're
-restarted. **Diagnostics → Agent chats** lists the ones that were open during an update.
+A chat's Gortex tools come from the Gortex it started with. On Paseo 0.14 and later,
+a verified update reopens the agent chats that are idle, so they use the new tools; busy
+chats are left alone, and the update result lists them. On Paseo 0.13, open chats keep
+the previous tools until they're restarted. **Diagnostics → Agent chats** lists the
+chats that were open during an update, and on Paseo 0.14 offers **Reopen idle chats**.
+Paseo 0.14 also releases a chat that's idle for an hour (unless the host turns that
+off), and a released chat resumes with the current tools.
+
+Idle status is checked immediately before each chat reload. Paseo has no atomic
+idle-only reload, so a turn submitted after that check could be interrupted. Confirm
+Gortex updates while the host is quiet. Provider refresh or reload failures are
+reported per chat; the binary update is not replayed to retry those chats.
 
 ## Current limits
 
@@ -151,12 +161,13 @@ restarted. **Diagnostics → Agent chats** lists the ones that were open during 
 
 ## Compatibility
 
-The installed integration runs on Paseo `0.12.0` with Gortex `0.64.9` and Node
-`22.14.0`, and is typechecked against the Paseo plugin SDK `0.12.0`. It was first
-validated with Paseo `0.8.0-beta.1` and Gortex `0.64.3`; the manifest accepts Paseo
-`0.8.0-beta.1` and later. Read adapters accept stable Gortex releases from 0.64.2;
-metadata writes and tracking/untracking need 0.64.3 or later. These are minimums, and
-native responses are still validated before any change.
+This release is typechecked against the Paseo plugin SDK `0.15.0` and verified on
+Paseo `0.15.0` with Gortex `0.64.11` and Node `22.14.0`. The manifest requires
+Paseo `0.13.2` or later. Automatic idle-chat refresh uses the session reload API
+available in Paseo `0.14` and later; older hosts keep the manual restart behavior.
+Read adapters accept stable Gortex releases from 0.64.2; metadata writes and
+tracking/untracking need 0.64.3 or later. These are minimums, and native responses
+are still validated before any change.
 
 Gortex and Git must be available on the Paseo daemon account's `PATH`, with Gortex's
 existing configuration and shared daemon accessible to that account. Native commands

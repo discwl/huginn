@@ -86,9 +86,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(suggestLatestRpc, async ({ path }) => ({ job: await suggester.latestFor(path) }));
   const evidence = hostEvidence(checkoutActivity);
   const diagnostics = new GortexDiagnostics(native, admin, () => library.close(), undefined, { evidence });
-  server.handle(diagnosticsRunRpc, () => diagnostics.start());
+  server.handle(diagnosticsRunRpc, (_input, { paseo }) => diagnostics.start(paseo));
   server.handle(diagnosticsLatestRpc, () => diagnostics.state());
-  server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }) => diagnostics.repair(reportId, remedyId));
+  server.handle(diagnosticsRepairRpc, ({ reportId, remedyId }, { paseo }) => diagnostics.repair(reportId, remedyId, paseo));
   server.handle(diagnosticsRepairJobRpc, ({ id }) => diagnostics.job(id));
   const settingsIo = hostSettingsIo(() => native.assignments());
   server.handle(hostSettingsRpc, () => readHostSettings(settingsIo));
@@ -100,7 +100,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(updateStatusRpc, () => updates.status());
   server.handle(updateCheckRpc, () => updates.check());
   server.handle(updatePreviewRpc, () => updates.preview());
-  server.handle(updateApplyRpc, ({ id }) => updates.apply(id));
+  server.handle(updateApplyRpc, ({ id }, { paseo }) => updates.apply(id, paseo));
   server.handle(updateJobRpc, ({ id }) => updates.job(id));
   server.handle(trackPreviewRpc, ({ path }) => track.preview(path));
   server.handle(trackApplyRpc, ({ id }) => track.apply(id));

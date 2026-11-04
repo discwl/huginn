@@ -5,13 +5,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { DiagnosticCheck, DiagnosticsReport, Remedy, RepairJob } from "../shared/diagnostics-contracts.ts";
 import type { NativeAssignment, NativeInfo } from "../shared/models.ts";
 import { nativeCompatibility } from "../shared/native-compatibility.ts";
-import { busyMessage, isBusyMessage, isLoadingMessage, isWarmingUpMessage, loadingMessage, warmupWindowSeconds } from "../shared/native-retry.ts";
+import { isBusyMessage, isLoadingMessage, isWarmingUpMessage, loadingMessage, warmupWindowSeconds } from "../shared/native-retry.ts";
 import { parseDaemonStatus, summarizeSessions, uptimeSeconds, type DaemonSession, type DaemonStatus } from "./daemon-status.ts";
 import { requestTimeouts, type DiagnosticsEvidence, type WorktreeChange } from "./diagnostics-evidence.ts";
+import { contractRepairEvidence } from "./contract-repair-evidence.ts";
 import { fullIndexes, lastCrash, readySeconds, stepLabel, triggerLabel, warmupTimeline } from "./warmup.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { runProcess } from "./process-runner.ts";
 import { repositoryPathKey } from "./project-catalog.ts";
+import { reopenIdleChats, surveyChats, type ChatSurvey, type ChatsPaseo } from "./agent-chats.ts";
 
 export interface DiagnosticsNative {
   version(): Promise<string>;
@@ -36,7 +38,7 @@ export interface DiagnosticsOptions { maxRepositories?: number; now?: () => numb
 /** The checks as diagnostics.run and diagnostics.latest report them: the latest report, and whether a run is going. */
 export interface DiagnosticsRunState { report: DiagnosticsReport | null; running: boolean }
 
-const REINDEX = "reindex:", PRUNE = "prune:";
+const REINDEX = "reindex:", PRUNE = "prune:", REOPEN = "reopen-chats";
 // Warm-up after a start is normally seconds; past this, a discovery failure on every repository is a wedge.
 const STUCK_AFTER_SECONDS = warmupWindowSeconds;
 // Gortex allows 250 ms for two Git commands; a single start slower than this leaves no headroom.
@@ -68,6 +70,8 @@ type EvidenceReads = {
   crash: Promise<{ text: string; writtenAt: number } | null>;
   changedAt: Promise<number | null>;
   changes: Promise<WorktreeChange[]>;
+  /** The open agent chats, from the Paseo that asked; null without one. */
+  chats: Promise<ChatSurvey | null>;
 };
 /** "45 s", "3 min", "2 h", "2 h 5 min". */
 function duration(seconds: number): string {
@@ -131,10 +135,11 @@ export class GortexDiagnostics {
 
   /**
    * Runs the checks, or joins the run already going. Answers with the report when the checks finish in time;
-   * otherwise running is true, and state() reports them once they finish.
+   * otherwise running is true, and state() reports them once they finish. paseo: the caller's Paseo, which the Agent
+   * chats check asks about open chats.
    */
-  async start(): Promise<DiagnosticsRunState> {
-    const run = this.checking ??= this.checkSafely().finally(() => { this.checking = null; });
+  async start(paseo?: ChatsPaseo): Promise<DiagnosticsRunState> {
+    const run = this.checking ??= this.checkSafely(paseo).finally(() => { this.checking = null; });
     const report = await within(run, this.answerWithinMs, null);
     return report ? { report, running: false } : this.state();
   }
@@ -142,9 +147,9 @@ export class GortexDiagnostics {
   state(): DiagnosticsRunState { return { report: this.latest(), running: this.checking !== null }; }
 
   /** run(), with an unexpected error reported as a failed check rather than lost in the background. */
-  private async checkSafely(): Promise<DiagnosticsReport> {
+  private async checkSafely(paseo?: ChatsPaseo): Promise<DiagnosticsReport> {
     const started = this.now();
-    try { return await this.run(); }
+    try { return await this.run(paseo); }
     catch (error) { return this.finish(started, [{ id: "checks", title: "Checks", state: "fail", detail: "The checks stopped before they finished. Run them again.", evidence: trim(message(error)) }], []); }
   }
 
@@ -169,7 +174,7 @@ export class GortexDiagnostics {
     return structuredClone(job);
   }
 
-  async run(): Promise<DiagnosticsReport> {
+  async run(paseo?: ChatsPaseo): Promise<DiagnosticsReport> {
     const started = this.now();
     const checks: DiagnosticCheck[] = [];
     const remedies = new Map<string, Remedy>();
@@ -219,19 +224,22 @@ export class GortexDiagnostics {
       else if (!daemonReady) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again; warm-up usually clears on its own.", risk: "safe", target: null });
     } catch (error) {
       checks.push({ id: "daemon", title: "Daemon", state: "fail", detail: "Could not read daemon status.", evidence: trim(message(error)) });
-      add({ id: "daemon-start", title: "Start the Gortex daemon", detail: "Runs gortex daemon start on this host.", risk: "safe", target: null });
+      add({ id: "recheck", title: "Re-check daemon status", detail: "Status could not be read, so the daemon's state is unknown. Re-check before choosing a repair.", risk: "safe", target: null });
     }
 
     // 3. MCP responsiveness: the lane agents and this plugin actually use.
-    const rows = await this.native.assignments().catch(() => null);
+    let mcpError: string | null = null;
+    const rows = await this.native.assignments().catch(error => { mcpError = message(error); return null; });
     if (!rows) {
-      checks.push({ id: "mcp", title: "MCP responses", state: "fail", detail: "Gortex accepted no MCP request from the plugin.", evidence: null });
-      add({ id: "daemon-restart", title: "Restart the Gortex daemon", detail: "Runs gortex daemon restart. Every client on this host reconnects, and running agents lose their Gortex session briefly.", risk: "host-wide", target: null });
+      checks.push({ id: "mcp", title: "MCP responses", state: "fail", detail: "The plugin's MCP catalog request failed. Daemon status alone does not establish that agent requests work.", evidence: mcpError === null ? null : trim(mcpError) });
+      // Logs and process evidence remain useful precisely when the MCP lane is unavailable.
+      if (this.evidence) await this.evidenceChecks(this.startReads(this.evidence, socket, [], paseo), checks, { sessions, trouble: true, status: daemonStatus, version, uptime, add });
+      add({ id: "recheck", title: "Re-check MCP access", detail: "Keep the failure evidence and re-check after current work settles. A failed request alone does not establish that a restart will help.", risk: "safe", target: null });
       return this.finish(started, checks, [...remedies.values()]);
     }
     checks.push({ id: "mcp", title: "MCP responses", state: "pass", detail: `Gortex answered the plugin and reports ${rows.length} tracked ${rows.length === 1 ? "repository" : "repositories"}.`, evidence: null });
     const probes = rows.slice(0, this.maxRepositories);
-    const reads = this.evidence ? this.startReads(this.evidence, socket, probes.map(row => row.path)) : null;
+    const reads = this.evidence ? this.startReads(this.evidence, socket, probes.map(row => row.path), paseo) : null;
 
     // 4. Index state per repository, from Gortex's own catalog.
     let repoRows: RepoRow[] = [];
@@ -239,7 +247,9 @@ export class GortexDiagnostics {
       const { output, error: catalogError } = await catalog;
       if (catalogError) throw catalogError;
       const parsed: unknown = JSON.parse(output.slice(output.indexOf("[")));
-      repoRows = Array.isArray(parsed) ? parsed as RepoRow[] : [];
+      if (!Array.isArray(parsed) || parsed.some(row => row === null || typeof row !== "object")) throw new Error("Gortex returned an invalid repository catalog.");
+      if (!parsed.length && rows.length) throw new Error("The CLI catalog is empty although MCP reports tracked repositories.");
+      repoRows = parsed as RepoRow[];
       const unindexed = repoRows.filter(row => row.indexed === false);
       const stale = repoRows.filter(row => row.indexed !== false && row.stale === true);
       checks.push({
@@ -277,7 +287,7 @@ export class GortexDiagnostics {
         const slow = gitMs > SLOW_GIT_MS;
         checks.push({
           id: "git", title: "Git speed", state: slow ? "warn" : "pass",
-          detail: slow ? `Git takes about ${gitMs} ms to start on this host. Gortex runs two Git commands before answering and allows 250 ms in total, so first requests fail with "checkout discovery is pending". The usual causes are other processes using the CPU, or antivirus scanning each process start. Restarting Gortex does not help.`
+          detail: slow ? `Git takes about ${gitMs} ms to start on this host. This leaves little headroom in Gortex's 250 ms checkout-discovery budget and can contribute to "checkout discovery is pending". This timing alone does not prove a failure or identify its cause; compare repository access and host load before choosing a repair.`
             : `Git starts in about ${gitMs} ms.`,
           evidence: `samples: ${samples.map(value => `${Math.round(value)} ms`).join(", ")}`,
         });
@@ -306,7 +316,7 @@ export class GortexDiagnostics {
         else if (starting || loadingPaths.has(repositoryPathKey(row.path))) { warming = true; startupFailures++; refused++; failures.push(`${row.repo}: ${trim(text, 120)}`); }
         else failures.push(`${row.repo}: ${trim(text, 120)}`);
       }
-      if (refused === batch.length) break;
+      if (busy || refused === batch.length) break;
     }
     const unprobed = probes.length - probed;
     // Stuck means: ready for minutes, Git is fast, nothing is still loading after a start, and every repository asked
@@ -317,8 +327,8 @@ export class GortexDiagnostics {
     const notAsked = unprobed ? ` The other ${plural(unprobed, "repository", "repositories")} weren't asked, since asking only adds to Gortex's work while it refuses everything.` : "";
     checks.push({
       id: "repositories", title: "Repository access",
-      state: failures.length === 0 ? retried.length ? "warn" : "pass" : stuck ? "fail" : busy || warming ? "warn" : "fail",
-      detail: failures.length === 0
+      state: !probed ? "skipped" : failures.length === 0 ? retried.length ? "warn" : "pass" : stuck ? "fail" : busy || warming ? "warn" : "fail",
+      detail: !probed ? "No tracked repositories were available to probe. Agent checkout access was not tested." : failures.length === 0
         ? retried.length ? `All ${probes.length} answer, but ${retried.length} only on a retry. Agents can see "checkout discovery is pending" on a first request; repeating the request right away works.`
           : `All ${probes.length} checked ${probes.length === 1 ? "repository answers" : "repositories answer"}.`
         : stuck ? `Gortex reports ready${gitMs === null ? "" : " and Git is fast"}, but checkout discovery fails for ${unprobed ? `the first ${probed}` : `all ${probed}`} ${probed === 1 ? "repository" : "repositories"} even on quick retries. It looks stuck rather than busy.${notAsked}`
@@ -331,26 +341,38 @@ export class GortexDiagnostics {
     if (busy) {
       checks.push({
         id: "capacity", title: "Request capacity", state: "warn",
-        detail: `${busyMessage} Restarting Paseo on this host has cleared this before, because it ends the agent sessions holding the slots; it also ends running agents.`,
+        detail: "Gortex is handling as many requests as it allows at once, so this request was refused. Further repository probes were stopped to avoid adding load. Inspect recent timeouts and build progress before retrying; busy responses alone do not identify the blocked operation.",
         evidence: sessions.length ? `${sessions.length} connected: ${summarizeSessions(sessions)}` : null,
       });
       add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again once the current requests finish.", risk: "safe", target: null });
     }
-    // 6. Worktrees whose folders are gone still cost Gortex discovery work on its single build lane.
-    if (this.cli.git) {
+    // 6. Inventory worktrees with bounded process fan-out. A failed Git read is unknown, never a clean bill of health.
+    if (this.cli.git && probes.length) {
       const stale: { repo: string; path: string; count: number }[] = [];
+      const errors: string[] = [];
       const git = this.cli.git;
-      const counts = await Promise.all(probes.map(row => git(["worktree", "list", "--porcelain"], row.path)
-        .then(output => output.split(/\r?\n/).filter(line => line.startsWith("prunable")).length, () => 0 /* Not a Git repository, or Git is unavailable: nothing to prune. */)));
-      probes.forEach((row, index) => { if (counts[index] > 0) stale.push({ repo: row.repo, path: row.path, count: counts[index] }); });
+      let inspected = 0, largest = 0;
+      for (let start = 0; start < probes.length; start += PROBE_BATCH) {
+        await Promise.all(probes.slice(start, start + PROBE_BATCH).map(async row => {
+          try {
+            const lines = (await git(["worktree", "list", "--porcelain"], row.path)).split(/\r?\n/);
+            const checkouts = lines.filter(line => line.startsWith("worktree ")).length;
+            if (!checkouts) throw new Error("Git returned no worktree records.");
+            inspected++;
+            largest = Math.max(largest, checkouts);
+            const count = lines.filter(line => line.startsWith("prunable")).length;
+            if (count) stale.push({ repo: row.repo, path: row.path, count });
+          } catch (error) { errors.push(`${row.repo}: ${trim(message(error), 100)}`); }
+        }));
+      }
       checks.push({
-        id: "worktrees", title: "Stale worktrees", state: stale.length ? "warn" : "pass",
-        detail: stale.length ? `${stale.reduce((sum, item) => sum + item.count, 0)} worktree record${stale.length === 1 && stale[0].count === 1 ? "" : "s"} point at folders that no longer exist.` : "No leftover worktree records.",
-        evidence: stale.length ? stale.map(item => `${item.repo}: ${item.count}`).join(" · ") : null,
+        id: "worktrees", title: "Worktree inventory", state: errors.length || stale.length ? "warn" : "pass",
+        detail: `${inspected} of ${probes.length} sampled repository roots inspected. ${inspected ? `The largest Git worktree list contains ${largest} checkouts. ${stale.length ? `${stale.length} lists contain prunable records.` : "No prunable records in those lists."}` : "Worktree state is unknown."}${errors.length ? ` ${errors.length} could not be inspected.` : ""} Git counts do not show which checkouts Gortex has activated or prove a build backlog.`,
+        evidence: trim([...stale.map(item => `${item.repo}: ${item.count} prunable`), ...errors].join(" · ")) || null,
       });
       for (const item of stale) add({ id: `${PRUNE}${item.path}`, title: `Prune stale worktrees in ${item.repo}`, detail: "Runs git worktree prune, which removes Git's records of worktrees whose folders are already gone. No files or branches are deleted.", risk: "safe", target: item.path });
     }
-    if (reads) await this.evidenceChecks(reads, checks, { sessions, trouble: stuck || discoveryFailures > 0, status: daemonStatus, version, uptime });
+    if (reads) await this.evidenceChecks(reads, checks, { sessions, trouble: stuck || discoveryFailures > 0, status: daemonStatus, version, uptime, add });
     if (warming) add({ id: "recheck", title: "Wait and re-check", detail: "Runs the same checks again. Gortex refuses requests while it discovers checkouts, which normally clears within minutes of a daemon start or a new worktree.", risk: "safe", target: null });
     if (failures.length && !busy && !warming && !stuck) {
       add({ id: "daemon-reload", title: "Reload Gortex configuration", detail: "Runs gortex daemon reload, which re-reads config.yaml and picks up added or removed repositories without a restart.", risk: "safe", target: null });
@@ -359,20 +381,38 @@ export class GortexDiagnostics {
     return this.finish(started, checks, [...remedies.values()]);
   }
 
-  private startReads(evidence: DiagnosticsEvidence, socket: string | null, repositories: string[]): EvidenceReads {
+  private startReads(evidence: DiagnosticsEvidence, socket: string | null, repositories: string[], paseo?: ChatsPaseo): EvidenceReads {
     return {
       log: evidence.daemonLog(socket).catch(() => null),
       crash: evidence.crashLog(socket).catch(() => null),
       changedAt: evidence.executableChangedAt().catch(() => null),
       changes: evidence.worktreeChanges(repositories, this.now() - WORKTREE_WINDOW_MS).catch((): WorktreeChange[] => []),
+      chats: paseo ? surveyChats(paseo).catch(() => null) : Promise.resolve(null),
     };
   }
 
   /** Checks read without asking Gortex: timeouts in its log, recent worktree changes, and chats older than its last update. */
-  private async evidenceChecks(reads: EvidenceReads, checks: DiagnosticCheck[], context: { sessions: DaemonSession[]; trouble: boolean; status: DaemonStatus | null; version: string; uptime: number | null }): Promise<void> {
+  private async evidenceChecks(reads: EvidenceReads, checks: DiagnosticCheck[], context: { sessions: DaemonSession[]; trouble: boolean; status: DaemonStatus | null; version: string; uptime: number | null; add: (remedy: Remedy) => void }): Promise<void> {
     const now = this.now();
     const log = await reads.log;
     this.startupCheck(checks, context.status, context.uptime, log, now);
+    const repairEvidence = contractRepairEvidence(log, now);
+    if (repairEvidence) checks.push(repairEvidence);
+    // A responsive daemon and a ready checkout do not certify analysis attachments.
+    const unsettled = log?.split(/\r?\n/).filter(line => line.includes("superseded_read_unsettled")) ?? [];
+    checks.push({
+      id: "contracts", title: "Contract analysis evidence", state: unsettled.length ? "warn" : "skipped",
+      detail: unsettled.length
+        ? `The retained daemon log contains ${unsettled.length} entries with superseded_read_unsettled. This is evidence about contract analysis, separate from MCP responsiveness and checkout build readiness. Capture the affected checkout, generation and capability response before choosing a repair; the log alone does not establish whether it is still failing.`
+        : "Current contract-analysis attachments were not tested. A successful repository probe does not certify impact or contract tools.",
+      evidence: unsettled.length ? trim(unsettled.slice(-2).join(" · ")) : null,
+    });
+    const degradedWatch = log?.split(/\r?\n/).filter(line => /\bwatch_degraded\b/.test(line)) ?? [];
+    if (degradedWatch.length) checks.push({
+      id: "watcher", title: "Filesystem watcher evidence", state: "warn",
+      detail: "The retained daemon log contains watch_degraded. Inspect the affected path and current watcher coverage; this is separate from a worktree build backlog. A historical warning does not prove the watcher is still degraded.",
+      evidence: trim(degradedWatch.slice(-2).join(" · ")),
+    });
     let timedOut = 0;
     if (log === null) checks.push({ id: "timeouts", title: "Requests that ran out of time", state: "skipped", detail: "Gortex's daemon log can't be read on this host, so request timeouts weren't checked.", evidence: null });
     else {
@@ -386,7 +426,7 @@ export class GortexDiagnostics {
       checks.push({
         id: "timeouts", title: "Requests that ran out of time", state: timedOut ? "warn" : "pass",
         detail: timedOut
-          ? `${plural(timedOut, "request")} in the last 15 minutes waited out Gortex's ${timeouts.deadlineSeconds ?? 60}-second limit without an answer. While one waits, it takes one of the 8 requests Gortex serves at a time, so other agents can be refused as busy.`
+          ? `${plural(timedOut, "request")} in the last 15 minutes waited out Gortex's ${timeouts.deadlineSeconds ?? 60}-second limit without an answer. Pending or detached handlers can consume request capacity, so other agents may be refused as busy. Correlate these timeouts with build progress; increasing the timeout does not remove a backlog.`
           : "No request waited out Gortex's time limit in the last 15 minutes.",
         evidence: timedOut ? trim(`${[...clients].map(([client, count]) => `${count} from ${client}`).join(", ")} · latest at ${timeouts.latest.map(at => stamp(at).slice(11)).join(", ")}`, 300) : null,
       });
@@ -413,13 +453,22 @@ export class GortexDiagnostics {
     const agents = context.sessions.filter(session => !NOT_AGENTS.has(session.client));
     if (changedAt !== null && agents.length) {
       const older = agents.filter(session => { const seconds = uptimeSeconds(session.connected); return seconds !== null && now - seconds * 1000 < changedAt; });
+      // Paseo 0.14 can reopen a chat, and releases one idle for an hour; either way it then starts the current Gortex.
+      const chats = await reads.chats;
+      const reopenable = chats?.reopenable === true;
+      const released = !reopenable ? "" : chats.releasesIdle === false
+        ? " This host keeps idle chats open (Release idle agents is off in Paseo's settings), so they keep their tools until they're reopened."
+        : " Paseo releases a chat that's idle for over an hour, and it resumes with the current Gortex tools.";
       checks.push({
         id: "sessions", title: "Agent chats", state: older.length ? "warn" : "pass",
         detail: older.length
-          ? `${plural(older.length, "agent chat was", "agent chats were")} already open when Gortex was last updated (${stamp(changedAt)}). They keep the previous Gortex tools until they're restarted, so their agents can report Gortex tools as missing.`
+          ? `${plural(older.length, "agent chat was", "agent chats were")} already open when Gortex was last updated (${stamp(changedAt)}). They keep the previous Gortex tools until they're restarted, so their agents can report Gortex tools as missing.${released}`
           : `${plural(agents.length, "agent chat is", "agent chats are")} connected, all opened after Gortex was last updated (${stamp(changedAt)}). A chat that has run for a long time can still keep older Gortex tools; restart it if its agent reports them missing.`,
         evidence: older.length ? trim(older.map(session => `${session.client}, connected ${session.connected}, ${session.cwd}`).join(" · "), 400) : null,
       });
+      if (older.length && reopenable && chats.idle.length) {
+        context.add({ id: REOPEN, title: "Reopen idle chats", detail: `Reopens the ${plural(chats.idle.length, "agent chat")} idle now, so ${chats.idle.length === 1 ? "it starts" : "they start"} the current Gortex. Busy chats aren't touched; they keep the previous tools until they're restarted.`, risk: "safe", target: null });
+      }
     }
   }
 
@@ -533,7 +582,7 @@ export class GortexDiagnostics {
   }
 
   /** Applies one remedy from a report, then re-runs the checks so the result is observed, not assumed. */
-  async repair(reportId: string, remedyId: string): Promise<RepairJob> {
+  async repair(reportId: string, remedyId: string, paseo?: ChatsPaseo): Promise<RepairJob> {
     const report = this.reports.get(reportId);
     if (!report) throw new Error("This report expired. Run diagnostics again before repairing.");
     const remedy = report.remedies.find(candidate => candidate.id === remedyId);
@@ -543,19 +592,25 @@ export class GortexDiagnostics {
     this.jobs.set(job.id, job);
     while (this.jobs.size > 20) this.jobs.delete(this.jobs.keys().next().value!);
     const release = this.admin.acquire();
-    this.running = this.execute(remedy, job).finally(() => { this.running = null; release(); });
+    this.running = this.execute(remedy, job, paseo).finally(() => { this.running = null; release(); });
     // A job that outlasts this is followed with job().
     await within(this.running, this.answerWithinMs, null);
     return structuredClone(job);
   }
 
-  private async execute(remedy: Remedy, job: RepairJob): Promise<void> {
+  private async execute(remedy: Remedy, job: RepairJob, paseo?: ChatsPaseo): Promise<void> {
     try {
       switch (true) {
         case remedy.id === "recheck": job.steps.push("Re-ran the checks without changing anything."); break;
         case remedy.id === "daemon-start": job.steps.push(trim(await this.cli.run(["daemon", "start"], 180_000)) || "Started the daemon."); break;
         case remedy.id === "daemon-reload": await this.native.reloadConfiguration(); job.steps.push("Reloaded Gortex configuration."); break;
         case remedy.id === "daemon-restart": job.steps.push(trim(await this.cli.run(["daemon", "restart"], 180_000)) || "Restarted the daemon."); break;
+        case remedy.id === REOPEN: {
+          const result = paseo ? await reopenIdleChats(paseo) : null;
+          if (!result) throw new Error("This Paseo can't reopen agent chats; restart them instead. Paseo 0.14 and later can reopen them.");
+          job.steps.push(result.summary);
+          break;
+        }
         case remedy.id.startsWith(PRUNE): {
           const path = remedy.target ?? remedy.id.slice(PRUNE.length);
           if (!this.cli.git) throw new Error("Git is unavailable on this host.");
@@ -578,7 +633,7 @@ export class GortexDiagnostics {
     }
     job.stage = "verifying";
     try {
-      const report = await this.run();
+      const report = await this.run(paseo);
       job.report = report;
       if (job.outcome !== "failed") job.outcome = report.state === "healthy" ? "fixed" : "unchanged";
     } catch (error) {

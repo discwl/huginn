@@ -8,6 +8,7 @@ import { GortexDiagnostics, type DiagnosticsCli, type DiagnosticsNative } from "
 import { CheckoutActivity, hostEvidence, type DiagnosticsEvidence } from "./diagnostics-evidence.ts";
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import type { NativeAssignment } from "../shared/models.ts";
+import { fakeChats } from "./chats-fixture.ts";
 
 const NOW = Date.parse("2026-10-20T18:00:00Z");
 const LONG_UP = " pid 26804\n socket    C:/Users/test/.gortex/cache/daemon.sock\n uptime    5d23h\n state     ready (warmup 21s)\n sessions  4\n";
@@ -100,6 +101,30 @@ test("agent chats opened before Gortex was last updated are named; the plugin's 
   const fresh = check(await diagnostics({ status, evidence: { executableChangedAt: async () => NOW - 5 * 24 * 3600_000 } }).run(), "sessions")!;
   assert.equal(fresh.state, "pass");
   assert.match(fresh.detail, /^2 agent chats are connected, all opened after Gortex was last updated/);
+});
+
+test("on Paseo 0.14 Agent chats offers to reopen idle chats and says idle ones are released; the repair reopens only idle ones", async () => {
+  const status = LONG_UP + sessions([["s1", "claude-code", "", "2h", "C:/Repos/r0"]]);
+  const d = diagnostics({ status, evidence: { executableChangedAt: async () => NOW - 60 * 60_000 } });
+  const chats = fakeChats([{ id: "a1", title: "Fix login" }, { id: "b2", title: "Release notes", status: "running" }]);
+  const report = await d.run(chats.paseo);
+  assert.match(check(report, "sessions")!.detail, /restarted, so their agents can report Gortex tools as missing\. Paseo releases a chat that's idle for over an hour, and it resumes with the current Gortex tools\.$/);
+  const remedy = report.remedies.find(entry => entry.id === "reopen-chats")!;
+  assert.equal(remedy.risk, "safe");
+  assert.match(remedy.detail, /^Reopens the 1 agent chat idle now, so it starts the current Gortex\. Busy chats aren't touched/);
+  const job = await d.repair(report.id, "reopen-chats", chats.paseo);
+  assert.equal(job.stage, "done");
+  assert.deepEqual(chats.reloaded, ["a1"]);
+  assert.match(job.steps[0], /^Reopened 1 idle chat so it uses the current Gortex tools\. 1 busy chat keeps the previous Gortex tools until it's restarted: Release notes\.$/);
+
+  const off = await d.run(fakeChats([{ id: "a1" }], { config: { idleRuntimeCleanup: false } }).paseo);
+  assert.match(check(off, "sessions")!.detail, /This host keeps idle chats open \(Release idle agents is off in Paseo's settings\)/);
+  for (const older of [await d.run(fakeChats([{ id: "a1" }], { reload: false }).paseo), await d.run()]) {
+    assert.equal(older.remedies.some(entry => entry.id === "reopen-chats"), false, "Paseo 0.13, or no Paseo: no reopen offered");
+    assert.doesNotMatch(check(older, "sessions")!.detail, /releases a chat/);
+  }
+  const busyOnly = await d.run(fakeChats([{ id: "b2", status: "running" }]).paseo);
+  assert.equal(busyOnly.remedies.some(entry => entry.id === "reopen-chats"), false, "nothing idle to reopen");
 });
 
 test("Paseo's worktree workspaces are recorded when created and archived; ordinary folders aren't", async () => {

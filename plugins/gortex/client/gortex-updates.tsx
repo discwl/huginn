@@ -7,7 +7,7 @@ import { updateStatusRpc, updateCheckRpc, updatePreviewRpc, updateApplyRpc, upda
 import { Action, Badge, Disclosure, Notice, SectionHeading } from "./controls.tsx";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
-const stages = { checking: "Checking the installed binary…", downloading: "Downloading and verifying the release…", installing: "Installing Gortex…", restarting: "Restarting the Gortex daemon…", verifying: "Verifying the installed version and daemon…", done: "Finished" };
+const stages = { checking: "Checking the installed binary…", downloading: "Downloading and verifying the release…", installing: "Installing Gortex…", restarting: "Restarting the Gortex daemon…", verifying: "Verifying the installed version and daemon…", reopening: "Reopening idle agent chats so they use the new Gortex…", done: "Finished" };
 const states = { unchecked: "Not checked", available: "Update available", current: "Up to date", ahead: "Newer than latest release", unavailable: "Check unavailable" };
 
 export function GortexUpdatesPanel(props: Props) { return <HostUpdates key={props.host.id} {...props} />; }
@@ -85,7 +85,8 @@ function HostUpdates({ host, theme }: Props) {
     {result && <>
       <Badge theme={theme} label={result.outcome === "updated" ? "Update verified" : result.outcome === "failed" ? "Update did not start" : "Update needs attention"} tone={result.outcome === "updated" ? "success" : "warning"} />
       {result.installedVersion && <Notice theme={theme} text={`Installed binary: ${result.installedVersion.replace(/\+.*$/, "")} · ${result.daemonReachable ? "Daemon reachable" : "Daemon availability not verified"}`} />}
-      {result.outcome === "updated" && <Notice theme={theme} text="Restart agent chats that were open during the update so they get the new Gortex tools. Diagnostics lists them." />}
+      {result.chats ? <Notice theme={theme} text={result.chats.summary} />
+        : result.outcome === "updated" && <Notice theme={theme} text="Restart agent chats that were open during the update so they get the new Gortex tools. Diagnostics lists them." />}
       {result.error && <Notice theme={theme} error text={result.error} />}
       {result.backupPath && <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>Previous executable: {result.backupPath}</Text>}
       {result.outcome !== "updated" && <Action theme={theme} title="Review current state" icon="RefreshCw" disabled={locked} onPress={checkUpdates} />}

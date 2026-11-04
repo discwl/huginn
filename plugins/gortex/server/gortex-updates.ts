@@ -7,6 +7,7 @@ import type { UpdateInstallation, UpdateJob, UpdatePreview, UpdateStatus } from 
 import { RepositoryAdminLock } from "./repository-admin-lock.ts";
 import { resolveHostExecutable } from "./host-executable.ts";
 import { runProcess } from "./process-runner.ts";
+import { reopenIdleChats, type ChatsPaseo } from "./agent-chats.ts";
 
 const releaseRoot = "https://github.com/zzet/gortex/releases";
 const stableTag = /^v(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/;
@@ -299,28 +300,29 @@ export class GortexUpdates {
     else warnings.push("Uses Gortex's detected native updater. Package managers control their available version and may install a newer release than the one shown. Agent configuration migration is disabled.");
     if (scoopAppFolder(status.installation.binary)) warnings.push("Scoop won't update Gortex while it runs, and each agent chat using Gortex keeps it running. While any does, the update is refused before anything changes.");
     warnings.push("The plugin validates native responses and operation support. A breaking Gortex API change may require a plugin update; newer stable version numbers alone do not disable repository controls.");
-    warnings.push("Agent chats that are already open keep the previous Gortex tools until they're restarted. Diagnostics lists them after the update.");
+    warnings.push("After the update, idle agent chats are reopened so they use the new Gortex tools (Paseo 0.14 and later). Chats observed as busy, and every open chat on older Paseo, keep the previous tools until they're restarted; Diagnostics lists them. Idle status is checked immediately before each reload, but Paseo has no atomic idle-only reload: a turn started after that check could be interrupted. Confirm updates while this host is quiet.");
     const preview = { id: randomUUID(), expiresAt: new Date(this.now() + 300_000).toISOString(), installation: status.installation, targetVersion: status.latestVersion, releaseUrl: status.releaseUrl, warnings };
     if (this.previews.size >= 40) this.previews.delete(this.previews.keys().next().value!);
     this.previews.set(preview.id, preview); return preview;
   }
-  apply(id: string): UpdateJob {
+  /** paseo: the caller's Paseo, used after a verified update to reopen idle agent chats where Paseo can. */
+  apply(id: string, paseo?: ChatsPaseo): UpdateJob {
     this.assertOpen();
     const accepted = this.jobs.get(id); if (accepted) return { ...accepted };
     const preview = this.previews.get(id);
     if (!preview || Date.parse(preview.expiresAt) <= this.now()) throw new Error("Update approval expired. Review the current state again.");
     const release = this.admin.acquire();
-    const job: UpdateJob = { id, targetVersion: preview.targetVersion, stage: "checking", outcome: "running", installedVersion: null, backupPath: null, daemonReachable: null, error: null };
+    const job: UpdateJob = { id, targetVersion: preview.targetVersion, stage: "checking", outcome: "running", installedVersion: null, backupPath: null, daemonReachable: null, error: null, chats: null };
     if (this.jobs.size >= 40) this.jobs.delete(this.jobs.keys().next().value!);
     this.jobs.set(id, job); this.latestJob = id; this.previews.delete(id);
-    this.active = this.execute(preview, job).finally(() => { release(); this.active = null; });
+    this.active = this.execute(preview, job, paseo).finally(() => { release(); this.active = null; });
     return { ...job };
   }
   private async verifyInstallation(preview: UpdatePreview): Promise<void> {
     const current = await this.port.inspect();
     if (current.binary !== preview.installation.binary || current.fingerprint !== preview.installation.fingerprint || current.version !== preview.installation.version || current.method !== preview.installation.method) throw new Error("The Gortex installation changed. Review the current state before updating.");
   }
-  private async execute(preview: UpdatePreview, job: UpdateJob): Promise<void> {
+  private async execute(preview: UpdatePreview, job: UpdateJob, paseo?: ChatsPaseo): Promise<void> {
     let attempted = false;
     try {
       await this.verifyInstallation(preview);
@@ -332,6 +334,11 @@ export class GortexUpdates {
       const matches = compareVersions(receipt.installedVersion, preview.targetVersion) >= 0;
       job.outcome = matches && receipt.daemonReachable && !receipt.warning ? "updated" : "needs-attention";
       job.error = !matches ? "The installed version does not match the approved update. Check the host before retrying." : receipt.warning;
+      // A chat's Gortex tools come from the Gortex it started with. On Paseo 0.14 idle chats reopen with the new one.
+      if (job.outcome === "updated" && paseo) {
+        job.stage = "reopening";
+        job.chats = await reopenIdleChats(paseo).catch(error => ({ reopened: [], busy: [], failed: [], summary: `Couldn't reopen agent chats (${error instanceof Error ? error.message : "Paseo didn't answer"}). Restart chats that were open during the update so they use the new Gortex tools.` }));
+      }
     } catch (error) {
       job.outcome = attempted ? "uncertain" : "failed";
       job.error = error instanceof Error ? error.message : "Gortex update failed.";
