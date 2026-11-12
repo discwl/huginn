@@ -60,3 +60,17 @@ test("whether Paseo releases idle chats follows its setting, which is on unless 
   assert.equal((await surveyChats(fakeChats(host, { config: () => Promise.reject(new Error("no config")) }).paseo)).releasesIdle, null);
   assert.equal((await surveyChats(fakeChats(host, { reload: false }).paseo)).releasesIdle, null, "not asked where chats can't be reopened");
 });
+
+test("chats in background workspaces aren't reopened: Paseo's idle release retires them safely", async () => {
+  const f = fakeChats([{ id: "a1", title: "Visible" }, { id: "b2", title: "Background worker", background: true }]);
+  assert.deepEqual((await reopenIdleChats(f.paseo))!.reopened, ["Visible"]);
+  assert.deepEqual(f.reloaded, ["a1"]);
+  assert.ok(f.filters.every(filter => !filter?.includeBackground), "background chats are never asked for");
+});
+
+test("a chat with background work isn't reopened, whether it was listed with it or started it after the list", async () => {
+  const f = fakeChats([{ id: "a1", title: "Shell running", backgroundWork: { count: 2 } }, { id: "b2", title: "Started a shell" }, { id: "c3", title: "Quiet" }], { startBackgroundWork: ["b2"] });
+  const result = (await reopenIdleChats(f.paseo))!;
+  assert.deepEqual(f.reloaded, ["c3"]);
+  assert.deepEqual(result.busy, ["Shell running", "Started a shell"]);
+});

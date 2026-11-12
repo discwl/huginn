@@ -12,6 +12,8 @@ export interface ChatSnapshot {
   activeTurn?: unknown;
   pendingPermissions?: readonly unknown[];
   archivedAt?: string | null;
+  /** Paseo 0.16: work the agent left running between turns, such as a background shell. Missing on older hosts. */
+  backgroundWork?: { count: number } | null;
 }
 /** The subset of an agent handle used here; the real `paseo.agents.ref()` satisfies it. */
 export interface ChatHandle {
@@ -19,7 +21,8 @@ export interface ChatHandle {
   readonly activeTurn: unknown;
   readonly pendingPermissions: readonly unknown[] | null;
   readonly archivedAt: string | null;
-  refresh(): Promise<unknown>;
+  /** The agent's current record, or null once it's gone. */
+  refresh(): Promise<{ agent: ChatSnapshot } | null>;
   /** Paseo 0.14 on: reopens the session with current configuration. */
   reload?(): Promise<unknown>;
 }
@@ -45,12 +48,21 @@ const plural = (count: number, one: string, many = `${one}s`) => `${count} ${cou
 const label = (chat: { id: string; title: string | null }) => chat.title?.trim() || `agent ${chat.id.slice(0, 7)}`;
 const message = (error: unknown) => error instanceof Error ? error.message : "Paseo didn't answer.";
 
-/** Idle: no running turn, no question waiting on someone, not archived and not released. */
-export function isIdle(chat: { status: string | null; activeTurn?: unknown; pendingPermissions?: readonly unknown[] | null; archivedAt?: string | null }): boolean {
-  return chat.status === "idle" && !chat.activeTurn && !chat.pendingPermissions?.length && !chat.archivedAt;
+/** Paseo 0.16 counts work an agent left running between turns. Reopening its session would end that work. */
+const backgroundWork = (chat: { backgroundWork?: { count?: number } | null } | null | undefined) => chat?.backgroundWork?.count ?? 0;
+
+/** Idle: no running turn or background work, no question waiting on someone, not archived and not released. */
+export function isIdle(chat: { status: string | null; activeTurn?: unknown; pendingPermissions?: readonly unknown[] | null; archivedAt?: string | null; backgroundWork?: { count?: number } | null }): boolean {
+  return chat.status === "idle" && !chat.activeTurn && !chat.pendingPermissions?.length && !chat.archivedAt && !backgroundWork(chat);
 }
 
-/** The open chats on this host: those not archived and not closed. A closed chat starts afresh on its next prompt. */
+/**
+ * The open chats on this host: those not archived and not closed. A closed chat starts afresh on its next prompt.
+ * Chats in background workspaces, and Paseo 0.16's background agents, are deliberately not listed. They're mostly
+ * automation, such as task workers or coordinators with provider subagents running, which Paseo doesn't count as
+ * background work, so one can look idle while a reopen would cancel its subagents. Paseo's own idle release checks for
+ * that work and retires them safely; they then start with the current Gortex tools.
+ */
 export async function surveyChats(paseo: ChatsPaseo): Promise<ChatSurvey> {
   const open: ChatSnapshot[] = [];
   let cursor: string | undefined;
@@ -91,8 +103,10 @@ export async function reopenIdleChats(paseo: ChatsPaseo): Promise<ChatReopen | n
     const handle = paseo.agents.ref(chat.id);
     try {
       // Gone since the list: nothing to reopen.
-      if (await handle.refresh() === null) continue;
-      if (!isIdle(handle)) { busy.push(label(chat)); continue; }
+      const refreshed = await handle.refresh();
+      if (refreshed === null) continue;
+      // The refreshed record, not the handle, carries Paseo 0.16's background work count.
+      if (!isIdle(refreshed.agent)) { busy.push(label(chat)); continue; }
       await handle.reload!();
       reopened.push(label(chat));
     } catch (error) {
