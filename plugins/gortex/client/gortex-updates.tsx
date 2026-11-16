@@ -12,6 +12,7 @@ const states = { unchecked: "Not checked", available: "Update available", curren
 
 export function GortexUpdatesPanel(props: Props) { return <HostUpdates key={props.host.id} {...props} />; }
 import { useHostDateTime } from "./host-time.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 function HostUpdates({ host, theme }: Props) {
   const dateTime = useHostDateTime();
@@ -21,7 +22,8 @@ function HostUpdates({ host, theme }: Props) {
   const [busy, setBusy] = useState(false), [details, setDetails] = useState(false);
   const inFlight = useRef(false), processed = useRef<string | null>(null);
   const status = useQuery({ queryKey: statusKey, queryFn: () => read({}), retry: false, refetchOnWindowFocus: false });
-  const job = useQuery({ queryKey: jobKey, queryFn: () => poll({}), retry: false, refetchOnWindowFocus: false, refetchInterval: query => !query.state.error && query.state.data?.outcome === "running" ? 1000 : false });
+  const jobFeed = useJobFeed(jobKey);
+  const job = useQuery({ queryKey: jobKey, queryFn: () => poll({}), retry: false, refetchOnWindowFocus: false, refetchInterval: query => !jobFeed.live && !query.state.error && query.state.data?.outcome === "running" ? 1000 : false });
   const running = job.data?.outcome === "running", locked = busy || running;
   const result = job.data?.stage === "done" ? job.data : null;
   const data = status.data;
@@ -56,6 +58,7 @@ function HostUpdates({ host, theme }: Props) {
     });
   }
   return <View style={{ borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 18, gap: 14 }}>
+    {jobFeed.follow(running && !job.error ? { kind: "update", id: job.data!.id } : null)}
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
       <SectionHeading theme={theme} title="Gortex updates" icon="Download" subtitle={`Installed on ${host.label}`} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>

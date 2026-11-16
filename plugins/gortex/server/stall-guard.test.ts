@@ -65,6 +65,17 @@ test("one answer within the window keeps the host from pausing, however many rep
   assert.notEqual(f.stalls.pausedUntil("C:/e"), null);
 });
 
+test("paused lists what is paused right now, for workspace badges", () => {
+  const f = guard();
+  assert.deepEqual(f.stalls.paused(), { host: false, repositories: [] });
+  for (let i = 0; i < 3; i++) f.stalls.refused("C:/a");
+  assert.deepEqual(f.stalls.paused(), { host: false, repositories: ["C:/a"] });
+  f.stalls.refused("C:/b"); f.stalls.refused("C:/c");
+  assert.deepEqual(f.stalls.paused(), { host: true, repositories: ["C:/a"] });
+  f.advance(60_000);
+  assert.deepEqual(f.stalls.paused(), { host: false, repositories: [] }, "expired pauses are not listed");
+});
+
 test("Try now ends every pause and every streak", () => {
   const f = guard();
   for (let i = 0; i < 3; i++) { f.stalls.refused("C:/a"); f.stalls.refused("C:/b"); f.stalls.refused("C:/c"); }

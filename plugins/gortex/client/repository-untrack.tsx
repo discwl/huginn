@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { untrackPreviewRpc, untrackApplyRpc, untrackJobRpc, type UntrackPreview } from "../shared/untrack-contracts.ts";
 import { Action, Badge, Notice, SectionHeading } from "./controls.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme"> & {
   path: string; disabled: boolean; onBusy: (busy: boolean, working: boolean) => void; onChanged: () => void;
@@ -19,7 +20,8 @@ export function RepositoryUntrack({ host, theme, path, disabled, onBusy, onChang
   const [jobId, setJobId] = useState<string | null>(() => queries.getQueryData<string>(activeKey) ?? null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false), processed = useRef<string | null>(null), reviewStarted = useRef(false);
-  const job = useQuery({ queryKey: [host.id, "gortex", "untrack-job", jobId], queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => query.state.error || query.state.data?.stage === "done" ? false : 1000 });
+  const jobKey = [host.id, "gortex", "untrack-job", jobId], jobFeed = useJobFeed(jobKey);
+  const job = useQuery({ queryKey: jobKey, queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => jobFeed.live || query.state.error || query.state.data?.stage === "done" ? false : 1000 });
   const running = jobId !== null && (!job.data || job.data.stage !== "done");
   useEffect(() => {
     onBusy(busy || running || preview !== null, busy || (running && !job.error));
@@ -61,6 +63,7 @@ export function RepositoryUntrack({ host, theme, path, disabled, onBusy, onChang
   const plan = preview?.native;
   const PlanList = autoReview ? View : ScrollView;
   return <View style={{ borderTopWidth: autoReview ? 0 : 1, borderColor: theme.colors.border, paddingTop: autoReview ? 0 : 18, gap: 12 }}>
+    {jobFeed.follow(running && !job.error ? { kind: "untrack", id: jobId! } : null)}
     {!autoReview && <SectionHeading theme={theme} title="Repository tracking" icon="CircleMinus" subtitle="Manage this repository’s dedicated Gortex index" />}
     <Notice theme={theme} text="Untracking releases the dedicated index. A worktree may still be indexed automatically through its family’s primary graph." />
     {busy && !preview && !running && <Notice theme={theme} text="Preparing the untracking confirmation…" />}

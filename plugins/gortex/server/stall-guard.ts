@@ -49,6 +49,12 @@ export class StallGuard {
     return until > this.now() ? until : null;
   }
 
+  /** What is paused right now: the whole host, and the repositories paused on their own. */
+  paused(): { host: boolean; repositories: string[] } {
+    const now = this.now();
+    return { host: (this.host?.until ?? 0) > now, repositories: [...this.repositories].filter(([, pause]) => pause.until > now).map(([key]) => key) };
+  }
+
   /**
    * Records a refusal and returns how long this repository's automatic requests now pause: 0 while the refusals
    * still look occasional, so the next refresh simply asks again.

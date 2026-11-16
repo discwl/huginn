@@ -39,6 +39,10 @@ import { homedir } from "node:os";
 import { hostSettingsIo, readHostSettings } from "./server/host-settings.ts";
 import { hostSettingsRpc } from "./shared/host-settings-contracts.ts";
 import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc } from "./shared/diagnostics-contracts.ts";
+import { jobFeedSubscription } from "./shared/job-feed-contracts.ts";
+import { followJobs, jobId } from "./server/job-feed.ts";
+import { workspaceBadgesRpc } from "./shared/workspace-badge-contracts.ts";
+import { listWorkspaces, WorkspaceBadges } from "./server/workspace-badges.ts";
 
 export default function contribute(server: PluginServerContext) {
   server.handle(hostTimeRpc, () => {
@@ -113,5 +117,20 @@ export default function contribute(server: PluginServerContext) {
   server.handle(metadataRepairRpc, ({ path, revision }) => metadata.previewRepair(path, revision));
   server.handle(metadataApplyRpc, ({ id }) => metadata.apply(id));
   server.handle(metadataJobRpc, ({ id }) => metadata.job(id));
+  // Paseo 0.16 hosts: panels follow these jobs over one subscription instead of polling the RPCs above, which stay for
+  // older apps and as the fallback. An older host has no defineSubscription, so the contract is null and nothing registers.
+  if (jobFeedSubscription) server.handle(jobFeedSubscription, followJobs({
+    diagnostics: { read: () => diagnostics.state(), final: state => !state.running },
+    "diagnostics.repair": { read: id => diagnostics.job(jobId(id)), final: job => job.stage === "done" },
+    update: { read: id => updates.job(id), final: job => job?.outcome !== "running" },
+    track: { read: id => track.job(jobId(id)), final: job => job.stage === "done" },
+    untrack: { read: id => untrack.job(jobId(id)), final: job => job.stage === "done" },
+    metadata: { read: id => metadata.job(jobId(id)), final: job => job.stage === "done" },
+    suggest: { read: id => suggester.job(jobId(id)), final: job => job.stage === "done" },
+    picker: { read: id => nativePicker.poll(jobId(id)), final: state => state.state !== "open" },
+    "auto-index": { read: () => ({ records: autoIndex.activity() }), final: () => false },
+  }));
+  const badges = new WorkspaceBadges({ tracked: async () => (await native.assignments()).map(row => row.path), paused: () => native.pauses() });
+  server.handle(workspaceBadgesRpc, (_input, { paseo }) => badges.read(() => listWorkspaces(paseo)));
   return async () => { directories.close(); nativePicker.close(); await Promise.all([suggester.close(), autoIndex.close(), metadata.close(), untrack.close(), track.close(), updates.close(), worktrees.close()]); library.close(); await native.close(); };
 }

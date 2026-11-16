@@ -5,6 +5,7 @@ import { Icon } from "@getpaseo/plugin/client/ui";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { suggestJobRpc, suggestLatestRpc, suggestStartRpc, type RuleSuggestion, type SuggestJob } from "../shared/exclusion-suggest-contracts.ts";
 import { Action, Badge, Disclosure, Notice } from "./controls.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme"> & { path: string; disabled: boolean; onApply: (lines: string[]) => void };
 const stages: Record<SuggestJob["stage"], string> = { gathering: "Surveying folders and .gitignore…", starting: "Starting a read-only agent…", thinking: "The agent is reviewing the survey…", done: "Finished" };
@@ -18,7 +19,8 @@ export function ExclusionSuggestions({ host, theme, path, disabled, onApply }: P
   const [open, setOpen] = useState(false), [applied, setApplied] = useState(0);
   const previous = useQuery({ queryKey: [host.id, "gortex", "suggest-latest", path], queryFn: () => latest({ path }), retry: false, staleTime: Infinity });
   useEffect(() => { if (!jobId && previous.data?.job) setJobId(previous.data.job.id); }, [previous.data, jobId]);
-  const job = useQuery({ queryKey: [host.id, "gortex", "suggest-job", jobId], queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchInterval: query => query.state.data?.stage === "done" || query.state.error ? false : 2000 });
+  const jobKey = [host.id, "gortex", "suggest-job", jobId], jobFeed = useJobFeed(jobKey);
+  const job = useQuery({ queryKey: jobKey, queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchInterval: query => jobFeed.live || query.state.data?.stage === "done" || query.state.error ? false : 2000 });
   const run = useMutation({ mutationFn: () => start({ path }), onSuccess: next => { setApplied(0); setSelected(new Set()); setJobId(next.id); } });
   const data = job.data, suggestion = data?.outcome === "ready" ? data.suggestion : null;
   const lineFor = (kind: "exclude" | "include", rule: RuleSuggestion) => kind === "include" ? `!${rule.pattern}` : rule.pattern;
@@ -43,6 +45,7 @@ export function ExclusionSuggestions({ host, theme, path, disabled, onApply }: P
     </Pressable>;
   };
   return <View style={{ gap: 10, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, padding: 12 }}>
+    {jobFeed.follow(data !== undefined && data.stage !== "done" && !job.error ? { kind: "suggest", id: data.id } : null)}
     <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "space-between" }}>
       <Text style={{ color: theme.colors.foreground, fontWeight: "600" }}>Suggestions from an agent</Text>
       <Action title={running ? "Working…" : data ? "Ask again" : "Suggest rules"} icon="Sparkles" theme={theme} disabled={disabled || running} onPress={() => run.mutate()} />

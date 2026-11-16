@@ -18,6 +18,7 @@ const keys = ["name", "workspace", "project"] as const;
 const stages = { validating: "Checking preview…", saving: "Saving configuration…", reloading: "Reloading Gortex configuration…", indexing: "Refreshing this repository’s index…", verifying: "Verifying daemon state…", done: "Finished" };
 
 import { useHostDateTime } from "./host-time.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Props) {
   const dateTime = useHostDateTime();
@@ -38,7 +39,8 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
   const [extraOpen, setExtraOpen] = useState(false);
   const requestInProgress = useRef(false);
   const processed = useRef<string | null>(null);
-  const job = useQuery({ queryKey: [host.id, "gortex", "metadata-job", jobId], queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => query.state.error ? false : query.state.data?.stage === "done" ? false : 1000 });
+  const jobKey = [host.id, "gortex", "metadata-job", jobId], jobFeed = useJobFeed(jobKey);
+  const job = useQuery({ queryKey: jobKey, queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => jobFeed.live || query.state.error ? false : query.state.data?.stage === "done" ? false : 1000 });
   const running = jobId !== null && (!job.data || job.data.stage !== "done");
   const locked = busy || running || untracking;
   function stopEditing() { setEditing(false); setRepairing(false); setDraft(null); setExclusionDraft(null); setPreview(null); }
@@ -63,6 +65,7 @@ export function RepositoryMetadata({ host, theme, path, onClose, onChanged }: Pr
   const fields = draft ?? current?.configured;
   const previewCard = preview && <MetadataChangePreview theme={theme} preview={preview} repair={repairing} locked={locked} onConfirm={() => { void request(async () => { const result = await apply({ id: preview.id }); setJobId(result.id); }); }} onCancel={() => { setPreview(null); setRepairing(false); }} />;
   return <Card theme={theme}>
+    {jobFeed.follow(running && !job.error ? { kind: "metadata", id: jobId! } : null)}
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
       <SectionHeading theme={theme} title="Repository settings" icon="Settings2" subtitle={`Native Gortex configuration on ${host.label}`} />
       <Action title="Back to repository" icon="ArrowLeft" theme={theme} onPress={onClose} disabled={locked} />

@@ -6,6 +6,7 @@ import { preferences } from "../shared/contracts.ts";
 import { autoIndexActivityRpc, type AutoIndexRecord } from "../shared/auto-index-contracts.ts";
 import { Badge, Button, Card, Notice, SectionHeading } from "./controls.tsx";
 import { HostTimeProvider, useHostDateTime } from "./host-time.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 export function Settings(props: PluginSurfaceProps) {
   return <HostTimeProvider key={props.host.id} hostId={props.host.id}><HostSettings {...props} /></HostTimeProvider>;
@@ -24,7 +25,8 @@ function HostSettings({ theme, host, layout }: PluginSurfaceProps) {
   const settings = useSettings(preferences);
   const dateTime = useHostDateTime();
   const readActivity = useRpc(autoIndexActivityRpc);
-  const activity = useQuery({ queryKey: [host.id, "gortex", "auto-index-activity"], queryFn: () => readActivity({}), refetchInterval: 5000, refetchIntervalInBackground: false, retry: false });
+  const activityKey = [host.id, "gortex", "auto-index-activity"], activityFeed = useJobFeed(activityKey);
+  const activity = useQuery({ queryKey: activityKey, queryFn: () => readActivity({}), refetchInterval: activityFeed.live ? false : 5000, refetchIntervalInBackground: false, retry: false });
   const saved = settings.status === "ready" ? settings.values.defaultWorkspace : "";
   const [workspace, setWorkspace] = useState(saved);
   useEffect(() => { setWorkspace(saved); }, [saved]);
@@ -36,6 +38,7 @@ function HostSettings({ theme, host, layout }: PluginSurfaceProps) {
   };
   const busy = settings.status !== "ready" || settings.saving;
   return <View style={{ padding: layout.compact ? 12 : 24, gap: 16, backgroundColor: theme.colors.surface0, flex: 1 }}>
+    {activityFeed.follow({ kind: "auto-index" })}
     <Card theme={theme}>
       <Text style={{ color: theme.colors.foreground, fontSize: 22, fontWeight: "700" }}>Gortex preferences · {host.label}</Text>
       <Notice theme={theme} text="These preferences are shared by every client connected to this host." />

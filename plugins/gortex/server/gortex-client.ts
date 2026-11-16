@@ -117,6 +117,9 @@ export class GortexClient implements NativePort {
     return this.stalls.pausedUntil(await realpath(cwd).catch(() => cwd));
   }
 
+  /** What the stall guard pauses right now, read from memory: workspace rows show it without asking Gortex. */
+  pauses(): { host: boolean; repositories: string[] } { return this.stalls.paused(); }
+
   /** Try now: automatic requests are sent again right away. */
   resumeRequests(): void { this.stalls.resume(); }
 

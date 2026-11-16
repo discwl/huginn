@@ -5,6 +5,7 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc, type DiagnosticCheck, type Remedy } from "../shared/diagnostics-contracts.ts";
 import { Action, Badge, Button, Card, Disclosure, Notice, SectionHeading } from "./controls.tsx";
 import { useHostDateTime } from "./host-time.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 const checkTone = { pass: "success", warn: "warning", fail: "danger", skipped: "neutral" } as const;
 const checkLabel = { pass: "OK", warn: "Check", fail: "Problem", skipped: "Skipped" } as const;
@@ -22,10 +23,12 @@ export function DiagnosticsPanel({ host, theme }: Pick<PluginSurfaceProps, "host
   const [confirming, setConfirming] = useState<Remedy | null>(null);
   const [evidence, setEvidence] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
-  const checks = useQuery({ queryKey: latestKey, queryFn: () => latest({}), retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchInterval: query => query.state.data?.running && !query.state.error ? 2000 : false });
+  // On Paseo 0.16 the host pushes progress while the checks or a repair run, and polling stops while it does.
+  const checksFeed = useJobFeed(latestKey), jobKey = [host.id, "gortex", "diagnostics-job", jobId], repairFeed = useJobFeed(jobKey);
+  const checks = useQuery({ queryKey: latestKey, queryFn: () => latest({}), retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchInterval: query => !checksFeed.live && query.state.data?.running && !query.state.error ? 2000 : false });
   const current = checks.data?.report ?? null;
   const run = useMutation({ mutationFn: () => runCheck({}), onSuccess: next => { queries.setQueryData(latestKey, next); setConfirming(null); } });
-  const job = useQuery({ queryKey: [host.id, "gortex", "diagnostics-job", jobId], queryFn: () => pollRepair({ id: jobId! }), enabled: jobId !== null, retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchInterval: query => query.state.error || query.state.data?.stage === "done" ? false : 2000 });
+  const job = useQuery({ queryKey: jobKey, queryFn: () => pollRepair({ id: jobId! }), enabled: jobId !== null, retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchInterval: query => repairFeed.live || query.state.error || query.state.data?.stage === "done" ? false : 2000 });
   const repair = useMutation({
     mutationFn: (remedy: Remedy) => repairRpc({ reportId: current!.id, remedyId: remedy.id }),
     onSuccess: next => { setConfirming(null); queries.setQueryData([host.id, "gortex", "diagnostics-job", next.id], next); setJobId(next.id); },
@@ -47,6 +50,8 @@ export function DiagnosticsPanel({ host, theme }: Pick<PluginSurfaceProps, "host
     </Disclosure>}
   </View>;
   return <Card theme={theme}>
+    {checksFeed.follow(checks.data?.running && !checks.error ? { kind: "diagnostics" } : null)}
+    {repairFeed.follow(jobId !== null && repaired?.stage !== "done" && !job.error ? { kind: "diagnostics.repair", id: jobId } : null)}
     <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
       <SectionHeading theme={theme} title="Diagnostics" icon="Stethoscope" subtitle={`Check Gortex on ${host.label} and fix what it finds`} />
       <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>

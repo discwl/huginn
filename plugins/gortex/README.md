@@ -161,10 +161,16 @@ reported per chat; the binary update is not replayed to retry those chats.
 
 ## Compatibility
 
-This release is typechecked against the Paseo plugin SDK `0.15.0` and verified on
+This release is typechecked against the Paseo plugin SDK `0.16.0` and verified on
 Paseo `0.15.0` with Gortex `0.64.11` and Node `22.14.0`. The manifest requires
 Paseo `0.13.2` or later. Automatic idle-chat refresh uses the session reload API
 available in Paseo `0.14` and later; older hosts keep the manual restart behavior.
+When both the host and the app run Paseo `0.16` or later, panels follow long-running
+work (diagnostics, repairs, updates, tracking, untracking, metadata saves, exclusion
+suggestions, the folder picker, and auto-index activity) over a subscription instead
+of polling, and sidebar workspace rows show **Not indexed** for a Git repository no
+tracked repository covers, or **Gortex paused** while requests to its repository
+are paused. With an older host or app, panels poll as before and rows show nothing.
 Read adapters accept stable Gortex releases from 0.64.2; metadata writes and
 tracking/untracking need 0.64.3 or later. These are minimums, and native responses
 are still validated before any change.

@@ -6,6 +6,7 @@ import { nativePickerCapabilitiesRpc, nativePickerStartRpc, nativePickerPollRpc,
 import { inspectRpc } from "../shared/contracts.ts";
 import { Action, Button, Card, Notice } from "./controls.tsx";
 import { GitInitControl } from "./git-init.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 import { localDaemonServerId, openDesktopFolderDialog } from "./web.ts";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme">;
@@ -31,7 +32,8 @@ export function NativeFolderButton({ host, theme, initialPath, onSelected }: Pro
     if (!mounted.current) { void cancel({ id }).catch(() => {}); return; }
     activeId.current = id; setJobId(id); setNotice(null);
   } });
-  const result = useQuery({ queryKey: [host.id, "gortex", "native-picker", jobId], queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => query.state.data?.state === "open" ? 400 : false });
+  const resultKey = [host.id, "gortex", "native-picker", jobId], resultFeed = useJobFeed(resultKey);
+  const result = useQuery({ queryKey: resultKey, queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => !resultFeed.live && query.state.data?.state === "open" ? 400 : false });
   const abort = useMutation({ mutationFn: () => cancel({ id: activeId.current! }), onSuccess: () => { setJobId(null); activeId.current = null; setNotice("Folder selection cancelled."); } });
   useEffect(() => {
     mounted.current = true;
@@ -52,6 +54,7 @@ export function NativeFolderButton({ host, theme, initialPath, onSelected }: Pro
   // No picker for this host: hide Browse rather than show a warning. Paseo projects can still be indexed from the list.
   if (!support.data?.available) return null;
   return <View style={{ gap: 6 }}>
+    {resultFeed.follow(jobId !== null && (!result.data || result.data.state === "open") && !result.error ? { kind: "picker", id: jobId } : null)}
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
       <Action title={busy ? "Choosing folder…" : "Browse…"} icon="FolderOpen" primary theme={theme} disabled={busy} onPress={() => { setNotice(null); launch.mutate(); }} />
       {jobId && <Button title="Cancel folder picker" theme={theme} disabled={abort.isPending} onPress={() => abort.mutate()} />}

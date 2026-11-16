@@ -5,6 +5,7 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { trackPreviewRpc, trackApplyRpc, trackJobRpc, observeTrackReadiness, type TrackPreview } from "../shared/track-contracts.ts";
 import { Action, Badge, Notice } from "./controls.tsx";
+import { useJobFeed } from "./job-feed.tsx";
 
 type Props = Pick<PluginSurfaceProps, "host" | "theme"> & { name: string; path: string; onClose: () => void; onChanged: () => void };
 const stages = { validating: "Checking the repository…", tracking: "Starting Gortex indexing…", verifying: "Refreshing native tracking state…", done: "Finished" };
@@ -22,7 +23,8 @@ function TrackDialog({ host, theme, name, path, onClose, onChanged }: Props) {
   const [readinessError, setReadinessError] = useState<string | null>(null);
   const started = useRef(false), inFlight = useRef(false), processed = useRef<string | null>(null), pollRef = useRef(poll);
   pollRef.current = poll;
-  const job = useQuery({ queryKey: [host.id, "gortex", "track-job", jobId], queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => query.state.error || query.state.data?.stage === "done" ? false : 1000 });
+  const jobKey = [host.id, "gortex", "track-job", jobId], jobFeed = useJobFeed(jobKey);
+  const job = useQuery({ queryKey: jobKey, queryFn: () => poll({ id: jobId! }), enabled: jobId !== null, retry: false, refetchOnWindowFocus: false, refetchInterval: query => jobFeed.live || query.state.error || query.state.data?.stage === "done" ? false : 1000 });
   const running = jobId !== null && (!job.data || job.data.stage !== "done");
   const locked = busy || (running && !job.error);
   async function request(work: () => Promise<void>) {
@@ -68,6 +70,7 @@ function TrackDialog({ host, theme, name, path, onClose, onChanged }: Props) {
   return <Modal title={`Index ${name} with Gortex?`} icon={<Icon name="Database" size={18} color={theme.colors.accent} />} open onOpenChange={open => { if (!open) dismiss(); }}>
     <Modal.Content>
       <View style={{ gap: 14 }}>
+        {jobFeed.follow(running && !job.error ? { kind: "track", id: jobId! } : null)}
         <Badge theme={theme} label={host.label} icon="Monitor" />
         <Text selectable style={{ color: theme.colors.foregroundMuted, fontFamily: "monospace", fontSize: 12, lineHeight: 18 }}>{preview?.path ?? path}</Text>
         {busy && !preview && !running && <Notice theme={theme} text="Checking the folder and native tracking configuration…" />}
