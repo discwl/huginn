@@ -41,8 +41,6 @@ import { hostSettingsRpc } from "./shared/host-settings-contracts.ts";
 import { diagnosticsLatestRpc, diagnosticsRepairJobRpc, diagnosticsRepairRpc, diagnosticsRunRpc } from "./shared/diagnostics-contracts.ts";
 import { jobFeedSubscription } from "./shared/job-feed-contracts.ts";
 import { followJobs, jobId } from "./server/job-feed.ts";
-import { workspaceBadgesRpc } from "./shared/workspace-badge-contracts.ts";
-import { listWorkspaces, WorkspaceBadges } from "./server/workspace-badges.ts";
 
 export default function contribute(server: PluginServerContext) {
   server.handle(hostTimeRpc, () => {
@@ -130,7 +128,5 @@ export default function contribute(server: PluginServerContext) {
     picker: { read: id => nativePicker.poll(jobId(id)), final: state => state.state !== "open" },
     "auto-index": { read: () => ({ records: autoIndex.activity() }), final: () => false },
   }));
-  const badges = new WorkspaceBadges({ tracked: async () => (await native.assignments()).map(row => row.path), paused: () => native.pauses() });
-  server.handle(workspaceBadgesRpc, (_input, { paseo }) => badges.read(() => listWorkspaces(paseo)));
   return async () => { directories.close(); nativePicker.close(); await Promise.all([suggester.close(), autoIndex.close(), metadata.close(), untrack.close(), track.close(), updates.close(), worktrees.close()]); library.close(); await native.close(); };
 }

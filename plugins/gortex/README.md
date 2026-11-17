@@ -168,9 +168,8 @@ available in Paseo `0.14` and later; older hosts keep the manual restart behavio
 When both the host and the app run Paseo `0.16` or later, panels follow long-running
 work (diagnostics, repairs, updates, tracking, untracking, metadata saves, exclusion
 suggestions, the folder picker, and auto-index activity) over a subscription instead
-of polling, and sidebar workspace rows show **Not indexed** for a Git repository no
-tracked repository covers, or **Gortex paused** while requests to its repository
-are paused. With an older host or app, panels poll as before and rows show nothing.
+of polling. With an older host or app, panels poll as before. The plugin adds nothing
+to Paseo's sidebar workspace rows.
 Read adapters accept stable Gortex releases from 0.64.2; metadata writes and
 tracking/untracking need 0.64.3 or later. These are minimums, and native responses
 are still validated before any change.
